@@ -9,6 +9,7 @@ app.use(express.static(path.join(__dirname, 'frontend', 'dist')));
 function toCamel(r) {
   return {
     id: r.id,
+    jobNumber: r.job_number || '',
     name: r.name,
     customer: r.customer || '',
     sellPrice: r.sell_price,
@@ -36,6 +37,7 @@ function toCamel(r) {
 
 function bindParams(p) {
   return [
+    p.jobNumber || '',
     p.name,
     p.customer || '',
     parseFloat(p.sellPrice) || null,
@@ -77,13 +79,13 @@ app.post('/api/projects', (req, res) => {
     const p = req.body;
     db.prepare(`
       INSERT INTO projects (
-        id, name, customer, sell_price, cost, status,
+        id, job_number, name, customer, sell_price, cost, status,
         bid_due_date, submitted_date, award_date, project_start_date,
         fab_start_date, galv_send_date, galv_return_date,
         paint_send_date, paint_complete_date,
         material_ordered, pm, drawing_status, change_orders,
         delivery_date, deliveries, notes, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(p.id, ...bindParams(p), p.createdAt || new Date().toISOString());
     res.json({ ok: true });
   } catch (err) {
@@ -98,7 +100,7 @@ app.put('/api/projects/:id', (req, res) => {
     const p = req.body;
     db.prepare(`
       UPDATE projects SET
-        name=?, customer=?, sell_price=?, cost=?, status=?,
+        job_number=?, name=?, customer=?, sell_price=?, cost=?, status=?,
         bid_due_date=?, submitted_date=?, award_date=?, project_start_date=?,
         fab_start_date=?, galv_send_date=?, galv_return_date=?,
         paint_send_date=?, paint_complete_date=?,
@@ -124,7 +126,6 @@ app.delete('/api/projects/:id', (req, res) => {
   }
 });
 
-// Serve React app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'frontend', 'dist', 'index.html'));
 });

@@ -10,6 +10,7 @@ const db = new Database(path.join(dataDir, 'projects.db'));
 db.exec(`
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
+    job_number TEXT,
     name TEXT NOT NULL,
     customer TEXT,
     sell_price REAL,
