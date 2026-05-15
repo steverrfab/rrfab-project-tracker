@@ -36,4 +36,7 @@ db.exec(`
   )
 `);
 
+// Migration: add job_number to existing tables
+try { db.exec('ALTER TABLE projects ADD COLUMN job_number TEXT'); } catch (_) {}
+
 module.exports = db;
