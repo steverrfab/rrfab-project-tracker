@@ -1,10 +1,79 @@
 const express = require('express');
 const path = require('path');
 const { pool, runMigrations } = require('./migrate');
+const auth = require('./auth');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'frontend', 'dist')));
+
+// ====== AUTH (public) ======
+app.get('/api/auth/status', async (req, res) => {
+  try {
+    const n = (await pool.query('SELECT count(*)::int AS n FROM users')).rows[0].n;
+    const u = auth.getUserFromReq(req);
+    res.json({ hasUsers: n > 0, authenticated: !!u, user: u ? { id: u.id, name: u.name, role: u.role } : null });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/auth/setup', async (req, res) => {
+  try {
+    const n = (await pool.query("SELECT count(*)::int AS n FROM users WHERE role='super_admin'")).rows[0].n;
+    if (n > 0) return res.status(400).json({ error: 'Already set up' });
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) return res.status(400).json({ error: 'Name, email and password are required' });
+    const { rows } = await pool.query(
+      "INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, 'super_admin') RETURNING id, name, role",
+      [name, String(email).toLowerCase(), auth.hashPassword(password)]);
+    auth.setAuthCookie(res, rows[0]);
+    res.json({ ok: true, user: { id: rows[0].id, name: rows[0].name, role: rows[0].role } });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.code === '23505' ? 'That email is already registered' : err.message }); }
+});
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [String(email || '').toLowerCase()]);
+    const u = rows[0];
+    if (!u || !u.is_active || !auth.verifyPassword(password || '', u.password_hash)) return res.status(401).json({ error: 'Invalid email or password' });
+    auth.setAuthCookie(res, u);
+    res.json({ ok: true, user: { id: u.id, name: u.name, role: u.role } });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/auth/logout', (req, res) => { auth.clearAuthCookie(res); res.json({ ok: true }); });
+
+// Everything else under /api requires a logged-in user.
+app.use('/api', auth.requireAuth);
+
+// ====== USERS (admins) ======
+const userToClient = u => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: u.is_active });
+app.get('/api/users', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try { const { rows } = await pool.query('SELECT * FROM users ORDER BY created_at'); res.json(rows.map(userToClient)); }
+  catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/users', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+    if (!['admin', 'accounting', 'pm', 'shop'].includes(role)) return res.status(400).json({ error: 'Pick a role (Admin, Accounting, PM, or Shop)' });
+    if (!name || !email || !password) return res.status(400).json({ error: 'Name, email and a temporary password are required' });
+    const { rows } = await pool.query(
+      'INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, String(email).toLowerCase(), auth.hashPassword(password), role]);
+    res.json(userToClient(rows[0]));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.code === '23505' ? 'That email is already registered' : err.message }); }
+});
+app.put('/api/users/:id', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const target = (await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id])).rows[0];
+    if (!target) return res.status(404).json({ error: 'Not found' });
+    if (target.role === 'super_admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only the Super Admin can change that account' });
+    const { name, role, active, password } = req.body;
+    const newRole = target.role === 'super_admin' ? 'super_admin' : (['admin', 'accounting', 'pm', 'shop'].includes(role) ? role : target.role);
+    await pool.query(
+      'UPDATE users SET name = COALESCE($1, name), role = $2, is_active = $3, password_hash = COALESCE($4, password_hash) WHERE id = $5',
+      [name || null, newRole, active != null ? !!active : target.is_active, password ? auth.hashPassword(password) : null, req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 
 // helpers
 const d = v => (v === undefined || v === null || v === '') ? null : v;
@@ -94,7 +163,7 @@ app.get('/api/projects', async (req, res) => {
 });
 
 // POST new project (DB generates the uuid; client id is ignored)
-app.post('/api/projects', async (req, res) => {
+app.post('/api/projects', auth.requireRole('super_admin', 'admin', 'pm'), async (req, res) => {
   const p = req.body;
   const client = await pool.connect();
   try {
@@ -104,16 +173,16 @@ app.post('/api/projects', async (req, res) => {
          job_number, name, customer, original_contract, cost, pm, status, drawing_status,
          bid_due_date, submitted_date, award_date, project_start_date, fab_start_date,
          galv_send_date, galv_return_date, paint_send_date, paint_complete_date,
-         material_ordered, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         material_ordered, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING id, status`,
-      projectValues(p)
+      [...projectValues(p), req.user.id]
     );
     const id = ins.rows[0].id;
     await replaceDeliveries(client, id, p.deliveries);
     await client.query(
-      'INSERT INTO stage_history (project_id, status) VALUES ($1, $2)',
-      [id, ins.rows[0].status]
+      'INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)',
+      [id, ins.rows[0].status, req.user.id]
     );
     await client.query('COMMIT');
     res.json({ ok: true, id });
@@ -127,7 +196,7 @@ app.post('/api/projects', async (req, res) => {
 });
 
 // PUT update project (records stage history when status changes)
-app.put('/api/projects/:id', async (req, res) => {
+app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), async (req, res) => {
   const p = req.body;
   const id = req.params.id;
   const client = await pool.connect();
@@ -150,8 +219,8 @@ app.put('/api/projects/:id', async (req, res) => {
     await replaceDeliveries(client, id, p.deliveries);
     if (prev.rows[0].status !== p.status) {
       await client.query(
-        'INSERT INTO stage_history (project_id, status) VALUES ($1, $2)',
-        [id, p.status]
+        'INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)',
+        [id, p.status, req.user.id]
       );
     }
     await client.query('COMMIT');
@@ -166,7 +235,7 @@ app.put('/api/projects/:id', async (req, res) => {
 });
 
 // DELETE = archive (keep the record, just hide it)
-app.delete('/api/projects/:id', async (req, res) => {
+app.delete('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), async (req, res) => {
   try {
     await pool.query('UPDATE projects SET is_archived = true WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
@@ -227,17 +296,17 @@ app.get('/api/projects/:id/change-orders', async (req, res) => {
   try { const { rows } = await pool.query('SELECT * FROM change_orders WHERE project_id = $1 ORDER BY co_number', [req.params.id]); res.json(rows.map(coToClient)); }
   catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.post('/api/projects/:id/change-orders', async (req, res) => {
+app.post('/api/projects/:id/change-orders', auth.requireRole('super_admin', 'admin', 'accounting', 'pm'), async (req, res) => {
   const c = req.body;
   try {
     const { rows } = await pool.query(
-      `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, paid_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [req.params.id, c.coNumber, d(c.description), money(c.amount) || 0, c.status || 'Pending', d(c.submittedDate), d(c.approvedDate), d(c.paidDate)]);
+      `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, paid_date, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [req.params.id, c.coNumber, d(c.description), money(c.amount) || 0, c.status || 'Pending', d(c.submittedDate), d(c.approvedDate), d(c.paidDate), req.user.id]);
     res.json(coToClient(rows[0]));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.put('/api/change-orders/:coId', async (req, res) => {
+app.put('/api/change-orders/:coId', auth.requireRole('super_admin', 'admin', 'accounting', 'pm'), async (req, res) => {
   const c = req.body;
   try {
     const { rows } = await pool.query(
@@ -247,7 +316,7 @@ app.put('/api/change-orders/:coId', async (req, res) => {
     res.json(coToClient(rows[0]));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.delete('/api/change-orders/:coId', async (req, res) => {
+app.delete('/api/change-orders/:coId', auth.requireRole('super_admin', 'admin', 'accounting', 'pm'), async (req, res) => {
   try { await pool.query('DELETE FROM change_orders WHERE id = $1', [req.params.coId]); res.json({ ok: true }); }
   catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -257,18 +326,18 @@ app.get('/api/projects/:id/invoices', async (req, res) => {
   try { const { rows } = await pool.query('SELECT * FROM invoices WHERE project_id = $1', [req.params.id]); res.json(invoiceRows(rows)); }
   catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.post('/api/projects/:id/invoices', async (req, res) => {
+app.post('/api/projects/:id/invoices', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   const a = req.body;
   const held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null;
   try {
     const { rows } = await pool.query(
-      `INSERT INTO invoices (project_id, application_number, period_end, work_completed_to_date, retainage_pct, retainage_held, status, submitted_date, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-      [req.params.id, parseInt(a.applicationNumber) || 1, d(a.periodEnd), money(a.workCompletedToDate) || 0, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.notes)]);
+      `INSERT INTO invoices (project_id, application_number, period_end, work_completed_to_date, retainage_pct, retainage_held, status, submitted_date, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+      [req.params.id, parseInt(a.applicationNumber) || 1, d(a.periodEnd), money(a.workCompletedToDate) || 0, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.notes), req.user.id]);
     res.json({ ok: true, id: rows[0].id });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.put('/api/invoices/:invId', async (req, res) => {
+app.put('/api/invoices/:invId', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   const a = req.body;
   const held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null;
   try {
@@ -279,7 +348,7 @@ app.put('/api/invoices/:invId', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.post('/api/invoices/:invId/payment', async (req, res) => {
+app.post('/api/invoices/:invId/payment', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   const p = req.body;
   try {
     const { rowCount } = await pool.query(
@@ -289,7 +358,7 @@ app.post('/api/invoices/:invId/payment', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
-app.delete('/api/invoices/:invId', async (req, res) => {
+app.delete('/api/invoices/:invId', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   try { await pool.query('DELETE FROM invoices WHERE id = $1', [req.params.invId]); res.json({ ok: true }); }
   catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
@@ -308,9 +377,9 @@ app.post('/api/projects/:id/documents', upload.single('file'), async (req, res) 
   try {
     if (!req.file) return res.status(400).json({ error: 'No file' });
     const { rows } = await pool.query(
-      `INSERT INTO documents (project_id, change_order_id, invoice_id, file_name, file_type, file_size, storage_key, category)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [req.params.id, d(req.body.changeOrderId), d(req.body.invoiceId), req.file.originalname, req.file.mimetype, req.file.size, req.file.filename, d(req.body.category) || 'general']);
+      `INSERT INTO documents (project_id, change_order_id, invoice_id, file_name, file_type, file_size, storage_key, category, uploaded_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [req.params.id, d(req.body.changeOrderId), d(req.body.invoiceId), req.file.originalname, req.file.mimetype, req.file.size, req.file.filename, d(req.body.category) || 'general', req.user.id]);
     res.json(docToClient(rows[0]));
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
