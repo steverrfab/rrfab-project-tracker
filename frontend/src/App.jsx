@@ -264,11 +264,12 @@ export default function App() {
     try {
       if (modal.mode === 'add') {
         await apiSave('POST', '/api/projects', p);
-        setProjects(prev => [p, ...prev]);
       } else {
         await apiSave('PUT', '/api/projects/' + p.id, p);
-        setProjects(prev => prev.map(x => x.id === p.id ? p : x));
       }
+      // Reload from the server so we use the canonical record (server-assigned id, etc.)
+      const fresh = await fetch('/api/projects').then(r => r.json());
+      setProjects(fresh);
       setModal(null);
     } catch { alert('Save failed. Please try again.'); }
     finally { setSaving(false); }

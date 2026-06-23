@@ -2,7 +2,8 @@
 // Runs on server startup. Safe to run repeatedly: it only creates the
 // tables if they are not already there.
 
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+types.setTypeParser(1082, v => v); // DATE -> 'YYYY-MM-DD' string (no timezone shift)
 const fs = require('fs');
 const path = require('path');
 
