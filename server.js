@@ -1,125 +1,174 @@
 const express = require('express');
 const path = require('path');
-const db = require('./db');
-const { runMigrations } = require('./migrate');
+const { pool, runMigrations } = require('./migrate');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'frontend', 'dist')));
 
-function toCamel(r) {
+// helpers
+const d = v => (v === undefined || v === null || v === '') ? null : v;
+const money = v => { const n = parseFloat(v); return isNaN(n) ? null : n; };
+
+// shape a DB row (+ its deliveries) into what the existing frontend expects
+function toClient(p, deliveries) {
   return {
-    id: r.id,
-    jobNumber: r.job_number || '',
-    name: r.name,
-    customer: r.customer || '',
-    sellPrice: r.sell_price,
-    cost: r.cost,
-    status: r.status,
-    bidDueDate: r.bid_due_date || '',
-    submittedDate: r.submitted_date || '',
-    awardDate: r.award_date || '',
-    projectStartDate: r.project_start_date || '',
-    fabStartDate: r.fab_start_date || '',
-    galvSendDate: r.galv_send_date || '',
-    galvReturnDate: r.galv_return_date || '',
-    paintSendDate: r.paint_send_date || '',
-    paintCompleteDate: r.paint_complete_date || '',
-    materialOrdered: !!r.material_ordered,
-    pm: r.pm || '',
-    drawingStatus: r.drawing_status || 'N/A',
-    changeOrders: r.change_orders || 0,
-    deliveryDate: r.delivery_date || '',
-    deliveries: JSON.parse(r.deliveries || '[]'),
-    notes: r.notes || '',
-    createdAt: r.created_at || '',
+    id: p.id,
+    jobNumber: p.job_number || '',
+    name: p.name,
+    customer: p.customer || '',
+    sellPrice: p.original_contract,
+    cost: p.cost,
+    status: p.status,
+    bidDueDate: p.bid_due_date || '',
+    submittedDate: p.submitted_date || '',
+    awardDate: p.award_date || '',
+    projectStartDate: p.project_start_date || '',
+    fabStartDate: p.fab_start_date || '',
+    galvSendDate: p.galv_send_date || '',
+    galvReturnDate: p.galv_return_date || '',
+    paintSendDate: p.paint_send_date || '',
+    paintCompleteDate: p.paint_complete_date || '',
+    materialOrdered: !!p.material_ordered,
+    pm: p.pm || '',
+    drawingStatus: p.drawing_status || 'N/A',
+    changeOrders: Number(p.change_orders_count) || 0,
+    deliveryDate: '',
+    deliveries: (deliveries || []).map(x => ({
+      id: x.id, date: x.delivery_date || '', desc: x.description || '', done: !!x.done,
+    })),
+    notes: p.notes || '',
+    createdAt: p.created_at ? new Date(p.created_at).toISOString() : '',
   };
 }
 
-function bindParams(p) {
+function projectValues(p) {
   return [
-    p.jobNumber || '',
-    p.name,
-    p.customer || '',
-    parseFloat(p.sellPrice) || null,
-    parseFloat(p.cost) || null,
-    p.status || 'Bidding',
-    p.bidDueDate || null,
-    p.submittedDate || null,
-    p.awardDate || null,
-    p.projectStartDate || null,
-    p.fabStartDate || null,
-    p.galvSendDate || null,
-    p.galvReturnDate || null,
-    p.paintSendDate || null,
-    p.paintCompleteDate || null,
-    p.materialOrdered ? 1 : 0,
-    p.pm || '',
-    p.drawingStatus || 'N/A',
-    parseInt(p.changeOrders) || 0,
-    p.deliveryDate || null,
-    JSON.stringify(p.deliveries || []),
-    p.notes || '',
+    d(p.jobNumber), p.name, d(p.customer), money(p.sellPrice), money(p.cost), d(p.pm),
+    p.status || 'Bidding', p.drawingStatus || 'N/A',
+    d(p.bidDueDate), d(p.submittedDate), d(p.awardDate), d(p.projectStartDate),
+    d(p.fabStartDate), d(p.galvSendDate), d(p.galvReturnDate), d(p.paintSendDate),
+    d(p.paintCompleteDate), p.materialOrdered ? true : false, d(p.notes),
   ];
 }
 
-// GET all projects
-app.get('/api/projects', (req, res) => {
+async function replaceDeliveries(client, projectId, deliveries) {
+  await client.query('DELETE FROM deliveries WHERE project_id = $1', [projectId]);
+  let i = 0;
+  for (const dv of (deliveries || [])) {
+    await client.query(
+      `INSERT INTO deliveries (project_id, delivery_date, description, done, done_at, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [projectId, d(dv.date), d(dv.desc), !!dv.done, dv.done ? new Date() : null, i++]
+    );
+  }
+}
+
+// GET all (non-archived)
+app.get('/api/projects', async (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
-    res.json(rows.map(toCamel));
+    const { rows } = await pool.query(
+      `SELECT p.*,
+         (SELECT count(*) FROM change_orders c WHERE c.project_id = p.id) AS change_orders_count
+       FROM projects p
+       WHERE p.is_archived = false
+       ORDER BY p.created_at DESC`
+    );
+    const ids = rows.map(r => r.id);
+    const delByProj = {};
+    if (ids.length) {
+      const dq = await pool.query(
+        `SELECT * FROM deliveries WHERE project_id = ANY($1::uuid[])
+         ORDER BY sort_order NULLS LAST, delivery_date NULLS LAST`,
+        [ids]
+      );
+      for (const dv of dq.rows) {
+        (delByProj[dv.project_id] = delByProj[dv.project_id] || []).push(dv);
+      }
+    }
+    res.json(rows.map(p => toClient(p, delByProj[p.id])));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST new project
-app.post('/api/projects', (req, res) => {
+// POST new project (DB generates the uuid; client id is ignored)
+app.post('/api/projects', async (req, res) => {
+  const p = req.body;
+  const client = await pool.connect();
   try {
-    const p = req.body;
-    db.prepare(`
-      INSERT INTO projects (
-        id, job_number, name, customer, sell_price, cost, status,
-        bid_due_date, submitted_date, award_date, project_start_date,
-        fab_start_date, galv_send_date, galv_return_date,
-        paint_send_date, paint_complete_date,
-        material_ordered, pm, drawing_status, change_orders,
-        delivery_date, deliveries, notes, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(p.id, ...bindParams(p), p.createdAt || new Date().toISOString());
+    await client.query('BEGIN');
+    const ins = await client.query(
+      `INSERT INTO projects (
+         job_number, name, customer, original_contract, cost, pm, status, drawing_status,
+         bid_due_date, submitted_date, award_date, project_start_date, fab_start_date,
+         galv_send_date, galv_return_date, paint_send_date, paint_complete_date,
+         material_ordered, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       RETURNING id, status`,
+      projectValues(p)
+    );
+    const id = ins.rows[0].id;
+    await replaceDeliveries(client, id, p.deliveries);
+    await client.query(
+      'INSERT INTO stage_history (project_id, status) VALUES ($1, $2)',
+      [id, ins.rows[0].status]
+    );
+    await client.query('COMMIT');
+    res.json({ ok: true, id });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT update project (records stage history when status changes)
+app.put('/api/projects/:id', async (req, res) => {
+  const p = req.body;
+  const id = req.params.id;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const prev = await client.query('SELECT status FROM projects WHERE id = $1', [id]);
+    if (prev.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    await client.query(
+      `UPDATE projects SET
+         job_number=$1, name=$2, customer=$3, original_contract=$4, cost=$5, pm=$6, status=$7,
+         drawing_status=$8, bid_due_date=$9, submitted_date=$10, award_date=$11,
+         project_start_date=$12, fab_start_date=$13, galv_send_date=$14, galv_return_date=$15,
+         paint_send_date=$16, paint_complete_date=$17, material_ordered=$18, notes=$19
+       WHERE id=$20`,
+      [...projectValues(p), id]
+    );
+    await replaceDeliveries(client, id, p.deliveries);
+    if (prev.rows[0].status !== p.status) {
+      await client.query(
+        'INSERT INTO stage_history (project_id, status) VALUES ($1, $2)',
+        [id, p.status]
+      );
+    }
+    await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error(err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
-// PUT update project
-app.put('/api/projects/:id', (req, res) => {
+// DELETE = archive (keep the record, just hide it)
+app.delete('/api/projects/:id', async (req, res) => {
   try {
-    const p = req.body;
-    db.prepare(`
-      UPDATE projects SET
-        job_number=?, name=?, customer=?, sell_price=?, cost=?, status=?,
-        bid_due_date=?, submitted_date=?, award_date=?, project_start_date=?,
-        fab_start_date=?, galv_send_date=?, galv_return_date=?,
-        paint_send_date=?, paint_complete_date=?,
-        material_ordered=?, pm=?, drawing_status=?, change_orders=?,
-        delivery_date=?, deliveries=?, notes=?
-      WHERE id=?
-    `).run(...bindParams(p), p.id);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// DELETE project
-app.delete('/api/projects/:id', (req, res) => {
-  try {
-    db.prepare('DELETE FROM projects WHERE id=?').run(req.params.id);
+    await pool.query('UPDATE projects SET is_archived = true WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
