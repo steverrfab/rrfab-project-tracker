@@ -80,6 +80,15 @@ async function runExtraMigrations() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes (project_id)');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS projected_start_date date');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS completed_date date');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS status text');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS fab_date date');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS galv_out_date date');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS galv_back_date date');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS paint_date date');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS ship_date date');
+    await client.query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS erect_date date');
+    await client.query("UPDATE deliveries SET status = CASE WHEN done THEN 'Shipped' ELSE 'In Fabrication' END WHERE status IS NULL");
+    await client.query('UPDATE deliveries SET ship_date = delivery_date WHERE ship_date IS NULL AND done = true');
     // Lifecycle now starts at Awarded; relax the status check and map old values.
     await client.query("UPDATE projects SET status = 'Awarded' WHERE status IN ('Bidding', 'Submitted')");
     await client.query("UPDATE projects SET status = 'On Hold' WHERE status = 'Lost/On Hold'");
