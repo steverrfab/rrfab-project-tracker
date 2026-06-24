@@ -326,8 +326,13 @@ function Detail({ id, user, onBack }) {
       <NotesCard projectId={id} notes={notes} onAdded={load} />
     </div>
 
-    <div className="card"><h3>Sequences {eS ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'seq', data: { status: 'Not started' } })}>+ Add sequence</button> : <span className="note">read-only</span>}</h3>
+    <div className="cols" style={{ marginTop: 14 }}>
+    <div className="card" style={{ margin: 0 }}><h3>Sequences {eS ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'seq', data: { status: 'Not started' } })}>+ Add sequence</button> : <span className="note">read-only</span>}</h3>
       {seqs.length ? seqs.map(q => { const chips = [['Fab', q.fabDate], ['Galv out', q.galvOut], ['Galv back', q.galvBack], ['Paint', q.paintDate], ['Ship', q.shipDate], ['Erect', q.erectDate]].filter(c => c[1]); const sc = SEQ_COLORS[q.status] || '#9aa0ab'; return <div key={q.id} style={{ padding: '10px 0', borderBottom: '1px solid #eef0f3' }}><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><b>{q.description || 'Sequence'}</b><span className="pill" style={{ background: sc + '1e', color: sc }}>{q.status}</span><div className="spacer" />{eS && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'seq', data: q })}>Edit</button>}</div><div className="datestrip" style={{ margin: '8px 0 0' }}>{chips.length ? chips.map((c, i) => <span className="dchip" key={i}>{c[0]}: <b>{fmtDate(c[1])}</b></span>) : <span className="note">No dates set yet</span>}</div></div>; }) : <div className="empty">No sequences yet.</div>}
+    </div>
+    <div className="card" style={{ margin: 0 }}><h3>Change orders {eC ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'co' })}>+ Add C/O</button> : <span className="note">read-only</span>}</h3>
+      {cos.length ? cos.map(c => <div className="li" key={c.id} style={{ cursor: 'pointer' }} onClick={() => setModal({ t: 'item', data: { kind: 'co', data: c } })}><div className="grow"><b>{c.coNumber}</b> · {c.description}<br /><span className="muted" style={{ fontSize: 12 }}>submitted {fmtDate(c.submittedDate)}</span></div><div className="num" style={{ minWidth: 90, textAlign: 'right', fontWeight: 700 }}>{fmt$(c.amount)}</div><div style={{ minWidth: 90, textAlign: 'right' }}>{coTag(c.status)}</div></div>) : <div className="empty">No change orders yet.</div>}
+    </div>
     </div>
 
     <div className="card"><h3>Pay applications {eI ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> : <span className="note">read-only</span>}</h3>
@@ -335,9 +340,6 @@ function Detail({ id, user, onBack }) {
         <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right">{eI && a.status !== 'Paid' && !a.amountPaid && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
     </div>
 
-    <div className="card"><h3>Change orders {eC ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'co' })}>+ Add C/O</button> : <span className="note">read-only</span>}</h3>
-      {cos.length ? cos.map(c => <div className="li" key={c.id} style={{ cursor: 'pointer' }} onClick={() => setModal({ t: 'item', data: { kind: 'co', data: c } })}><div className="grow"><b>{c.coNumber}</b> · {c.description}<br /><span className="muted" style={{ fontSize: 12 }}>submitted {fmtDate(c.submittedDate)}</span></div><div className="num" style={{ minWidth: 90, textAlign: 'right', fontWeight: 700 }}>{fmt$(c.amount)}</div><div style={{ minWidth: 90, textAlign: 'right' }}>{coTag(c.status)}</div></div>) : <div className="empty">No change orders yet.</div>}
-    </div>
 
     <div className="card"><h3>Documents {can.upload() ? <UploadBtn projectId={id} onDone={load} /> : null}</h3>
       {docs.length ? docs.map(f => <div className="li" key={f.id}><div className="grow">📄 {f.fileName} <span className="muted" style={{ fontSize: 12 }}>· {(f.fileSize / 1024).toFixed(0)} KB · {f.category}</span></div><a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + f.id + '/download'}>Download</a></div>) : <div className="empty">No documents uploaded.</div>}
