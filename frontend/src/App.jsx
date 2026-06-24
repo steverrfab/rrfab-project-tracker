@@ -11,6 +11,8 @@ const DRAWING = ['N/A', 'Not Started', 'In Progress', 'Approved', 'Revision Need
 const CO_STATUS = ['Pending', 'Approved', 'Paid'];
 const PAYAPP_STATUS = ['Draft', 'Submitted', 'Approved', 'Paid'];
 const PMS = ['Joe Jenkins', 'Steve Moskowitz', 'Tanja', 'Unassigned'];
+const SEQ_STATUS = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped', 'Erected'];
+const SEQ_COLORS = { 'Not started': '#9aa0ab', 'In Fabrication': '#f97316', 'In Galvanizing': '#0d9488', 'In Paint': '#7c3aed', 'Shipped': '#06b6d4', 'Erected': '#16a34a' };
 const ROLE_LABEL = { super_admin: 'Super Admin', admin: 'Admin', accounting: 'Accounting', pm: 'PM', shop: 'Shop' };
 const DATE_FIELDS = ['Award', 'Projected start', 'Delivery', 'Completed'];
 
@@ -227,7 +229,7 @@ function Dashboard({ user, onOpen }) {
       </div>
 
       {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? 'Drag a card to another column to change its stage.' : 'Read-only view.'}</div><div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div><div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div></div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div></>
-        : <div className="panel"><table><thead><tr><th>Project</th><th>Contract</th><th>Margin</th><th>Status</th><th>Drawings</th><th>Deliveries</th><th>PM</th></tr></thead>
+        : <div className="panel"><table><thead><tr><th>Project</th><th>Contract</th><th>Margin</th><th>Status</th><th>Drawings</th><th>Sequences</th><th>PM</th></tr></thead>
           <tbody>{list.length ? list.map(p => {
             const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
             const done = (p.deliveries || []).filter(d => d.done).length; const od = overdueCount(p);
@@ -258,7 +260,7 @@ function ItemModal({ item, onClose }) {
 }
 
 function Detail({ id, user, onBack }) {
-  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({});
+  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [seqs, setSeqs] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({});
   const load = useCallback(async () => {
     const all = await api.get('/api/projects'); setP(all.find(x => x.id === id) || null);
     setHist(await api.get('/api/projects/' + id + '/stage-history'));
@@ -266,6 +268,7 @@ function Detail({ id, user, onBack }) {
     setInvs(await api.get('/api/projects/' + id + '/invoices'));
     setDocs(await api.get('/api/projects/' + id + '/documents'));
     setNotes(await api.get('/api/projects/' + id + '/notes'));
+    setSeqs(await api.get('/api/projects/' + id + '/sequences'));
   }, [id]);
   useEffect(() => { load(); }, [load]);
   if (!p) return <div className="wrap"><div className="who" style={{ marginTop: 30 }}>Loading…</div></div>;
@@ -277,7 +280,7 @@ function Detail({ id, user, onBack }) {
   const retHeld = last ? Number(last.retainageHeld) : 0;
   const totalPaid = invs.reduce((s, a) => s + Number(a.amountPaid || 0), 0);
   const gp = contractSum - (Number(p.cost) || 0); const gm = contractSum > 0 ? gp / contractSum * 100 : 0;
-  const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role);
+  const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role); const eS = ['super_admin', 'admin', 'pm', 'shop'].includes(user.role);
 
   const feed = [];
   hist.forEach(h => feed.push({ when: h.changedAt, t: 'Moved to ' + h.status, w: h.changedBy }));
@@ -320,6 +323,10 @@ function Detail({ id, user, onBack }) {
       <NotesCard projectId={id} notes={notes} onAdded={load} />
     </div>
 
+    <div className="card"><h3>Sequences {eS ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'seq', data: { status: 'Not started' } })}>+ Add sequence</button> : <span className="note">read-only</span>}</h3>
+      {seqs.length ? seqs.map(q => { const chips = [['Fab', q.fabDate], ['Galv out', q.galvOut], ['Galv back', q.galvBack], ['Paint', q.paintDate], ['Ship', q.shipDate], ['Erect', q.erectDate]].filter(c => c[1]); const sc = SEQ_COLORS[q.status] || '#9aa0ab'; return <div key={q.id} style={{ padding: '10px 0', borderBottom: '1px solid #eef0f3' }}><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><b>{q.description || 'Sequence'}</b><span className="pill" style={{ background: sc + '1e', color: sc }}>{q.status}</span><div className="spacer" />{eS && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'seq', data: q })}>Edit</button>}</div><div className="datestrip" style={{ margin: '8px 0 0' }}>{chips.length ? chips.map((c, i) => <span className="dchip" key={i}>{c[0]}: <b>{fmtDate(c[1])}</b></span>) : <span className="note">No dates set yet</span>}</div></div>; }) : <div className="empty">No sequences yet.</div>}
+    </div>
+
     <div className="card"><h3>Pay applications {eI ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> : <span className="note">read-only</span>}</h3>
       {invs.length ? <table><thead><tr><th>App #</th><th>Period</th><th className="right">Completed</th><th className="right">Retainage</th><th className="right">Due</th><th className="right">Paid</th><th>Status</th><th /></tr></thead>
         <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right">{eI && a.status !== 'Paid' && !a.amountPaid && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
@@ -338,6 +345,7 @@ function Detail({ id, user, onBack }) {
     {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'payment' && <PaymentModal inv={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'item' && <ItemModal item={modal.data} onClose={() => setModal(null)} />}
+    {modal && modal.t === 'seq' && <SequenceModal projectId={id} seq={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
   </div>;
 }
 
@@ -354,6 +362,23 @@ function UploadBtn({ projectId, onDone }) {
   const [busy, setBusy] = useState(false);
   const onPick = async e => { const file = e.target.files[0]; if (!file) return; setBusy(true); const fd = new FormData(); fd.append('file', file); fd.append('category', 'general'); try { await fetch('/api/projects/' + projectId + '/documents', { method: 'POST', body: fd }); onDone(); } catch (_) { alert('Upload failed'); } setBusy(false); e.target.value = ''; };
   return <label className="btn-pri btn-sm" style={{ cursor: 'pointer' }}>{busy ? 'Uploading…' : '+ Upload'}<input type="file" style={{ display: 'none' }} onChange={onPick} /></label>;
+}
+
+function SequenceModal({ projectId, seq, onClose, onSaved }) {
+  const [q, setQ] = useState({ description: '', status: 'Not started', fabDate: '', galvOut: '', galvBack: '', paintDate: '', shipDate: '', erectDate: '', ...seq });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  const set = k => e => setQ({ ...q, [k]: e.target.value });
+  const save = async () => { setBusy(true); setErr(null); try { if (q.id) await api.send('PUT', '/api/sequences/' + q.id, q); else await api.send('POST', '/api/projects/' + projectId + '/sequences', q); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
+  const del = async () => { if (!q.id || !confirm('Delete this sequence?')) return; setBusy(true); try { await api.send('DELETE', '/api/sequences/' + q.id); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
+  return <Modal onClose={onClose}><h2>{q.id ? 'Edit sequence' : 'Add sequence'}</h2>
+    <div className="row2"><div className="field"><label>Sequence name</label><input value={q.description} onChange={set('description')} placeholder="Seq 1 - columns" /></div><div className="field"><label>Status</label><select value={q.status} onChange={set('status')}>{SEQ_STATUS.map(x => <option key={x}>{x}</option>)}</select></div></div>
+    <div className="row2"><div className="field"><label>Fabrication complete</label><input type="date" value={q.fabDate || ''} onChange={set('fabDate')} /></div><div className="field"><label>Galv out</label><input type="date" value={q.galvOut || ''} onChange={set('galvOut')} /></div></div>
+    <div className="row2"><div className="field"><label>Galv back</label><input type="date" value={q.galvBack || ''} onChange={set('galvBack')} /></div><div className="field"><label>Paint complete</label><input type="date" value={q.paintDate || ''} onChange={set('paintDate')} /></div></div>
+    <div className="row2"><div className="field"><label>Shipped</label><input type="date" value={q.shipDate || ''} onChange={set('shipDate')} /></div><div className="field"><label>Erected</label><input type="date" value={q.erectDate || ''} onChange={set('erectDate')} /></div></div>
+    <div className="note">Setting status to Shipped or Erected marks the sequence complete.</div>
+    {err && <div className="err">{err}</div>}
+    <div className="actions">{q.id && <button className="btn-ghost" style={{ color: 'var(--r)' }} onClick={del}>Delete</button>}<div className="spacer" /><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>{q.id ? 'Save' : 'Add'}</button></div>
+  </Modal>;
 }
 
 function CoModal({ projectId, onClose, onSaved }) {

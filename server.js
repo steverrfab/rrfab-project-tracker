@@ -104,7 +104,9 @@ function toClient(p, deliveries) {
     changeOrders: Number(p.change_orders_count) || 0,
     deliveryDate: '',
     deliveries: (deliveries || []).map(x => ({
-      id: x.id, date: x.delivery_date || '', desc: x.description || '', done: !!x.done,
+      id: x.id, date: (x.ship_date || x.delivery_date) || '', desc: x.description || '', done: !!x.done,
+      status: x.status || '', fabDate: x.fab_date || '', galvOut: x.galv_out_date || '', galvBack: x.galv_back_date || '',
+      paintDate: x.paint_date || '', shipDate: (x.ship_date || x.delivery_date) || '', erectDate: x.erect_date || '',
     })),
     notes: p.notes || '',
     createdAt: p.created_at ? new Date(p.created_at).toISOString() : '',
@@ -181,7 +183,6 @@ app.post('/api/projects', auth.requireRole('super_admin', 'admin', 'pm'), async 
       [...projectValues(p), d(p.projectedStartDate), req.user.id]
     );
     const id = ins.rows[0].id;
-    await replaceDeliveries(client, id, p.deliveries);
     await client.query(
       'INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)',
       [id, ins.rows[0].status, req.user.id]
@@ -219,7 +220,6 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
        WHERE id=$21`,
       [...projectValues(p), d(p.projectedStartDate), id]
     );
-    await replaceDeliveries(client, id, p.deliveries);
     if (p.status === 'Completed') await client.query('UPDATE projects SET completed_date = COALESCE(completed_date, CURRENT_DATE) WHERE id = $1', [id]);
     if (prev.rows[0].status !== p.status) {
       await client.query(
@@ -459,6 +459,38 @@ app.post('/api/projects/:id/notes', async (req, res) => {
     const { rows } = await pool.query('INSERT INTO project_notes (project_id, body, created_by) VALUES ($1, $2, $3) RETURNING id', [req.params.id, body, req.user.id]);
     res.json({ ok: true, id: rows[0].id });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// ====== SEQUENCES (per-job, each with its own milestone dates) ======
+const SEQ_DONE = st => st === 'Shipped' || st === 'Erected';
+const seqToClient = q => ({ id: q.id, description: q.description || '', status: q.status || 'Not started', done: !!q.done, fabDate: q.fab_date || '', galvOut: q.galv_out_date || '', galvBack: q.galv_back_date || '', paintDate: q.paint_date || '', shipDate: q.ship_date || '', erectDate: q.erect_date || '', sortOrder: q.sort_order });
+app.get('/api/projects/:id/sequences', async (req, res) => {
+  try { const { rows } = await pool.query('SELECT * FROM deliveries WHERE project_id = $1 ORDER BY sort_order NULLS LAST, ship_date NULLS LAST', [req.params.id]); res.json(rows.map(seqToClient)); }
+  catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/projects/:id/sequences', auth.requireRole('super_admin', 'admin', 'pm', 'shop'), async (req, res) => {
+  const q = req.body;
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO deliveries (project_id, description, status, done, fab_date, galv_out_date, galv_back_date, paint_date, ship_date, erect_date, delivery_date, sort_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11) RETURNING *`,
+      [req.params.id, d(q.description), q.status || 'Not started', SEQ_DONE(q.status), d(q.fabDate), d(q.galvOut), d(q.galvBack), d(q.paintDate), d(q.shipDate), d(q.erectDate), parseInt(q.sortOrder) || 0]);
+    res.json(seqToClient(rows[0]));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/sequences/:seqId', auth.requireRole('super_admin', 'admin', 'pm', 'shop'), async (req, res) => {
+  const q = req.body;
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE deliveries SET description=$1, status=$2, done=$3, fab_date=$4, galv_out_date=$5, galv_back_date=$6, paint_date=$7, ship_date=$8, delivery_date=$8, erect_date=$9 WHERE id=$10`,
+      [d(q.description), q.status || 'Not started', SEQ_DONE(q.status), d(q.fabDate), d(q.galvOut), d(q.galvBack), d(q.paintDate), d(q.shipDate), d(q.erectDate), req.params.seqId]);
+    if (!rowCount) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/sequences/:seqId', auth.requireRole('super_admin', 'admin', 'pm', 'shop'), async (req, res) => {
+  try { await pool.query('DELETE FROM deliveries WHERE id = $1', [req.params.seqId]); res.json({ ok: true }); }
+  catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 app.get('*', (req, res) => {
