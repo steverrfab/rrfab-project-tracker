@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const { pool, runMigrations, seedDemoIfNeeded } = require('./migrate');
+const { pool, runMigrations, runExtraMigrations, seedDemoIfNeeded } = require('./migrate');
 const auth = require('./auth');
 
 const app = express();
@@ -438,12 +438,31 @@ app.get('/api/billing', async (req, res) => {
 });
 
 
+// ====== PROJECT NOTES (running log) ======
+app.get('/api/projects/:id/notes', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT n.id, n.body, n.created_at, u.name AS author
+       FROM project_notes n LEFT JOIN users u ON u.id = n.created_by
+       WHERE n.project_id = $1 ORDER BY n.created_at DESC`, [req.params.id]);
+    res.json(rows.map(r => ({ id: r.id, body: r.body, createdAt: r.created_at, author: r.author || '' })));
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/projects/:id/notes', async (req, res) => {
+  const body = (req.body.body || '').trim();
+  if (!body) return res.status(400).json({ error: 'Note is empty' });
+  try {
+    const { rows } = await pool.query('INSERT INTO project_notes (project_id, body, created_by) VALUES ($1, $2, $3) RETURNING id', [req.params.id, body, req.user.id]);
+    res.json({ ok: true, id: rows[0].id });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'frontend', 'dist', 'index.html'));
 });
 
 // Create the PostgreSQL tables on startup (non-fatal if it cannot connect).
-runMigrations().then(() => seedDemoIfNeeded()).catch(err => console.error('[startup] failed:', err.message));
+runMigrations().then(() => runExtraMigrations()).then(() => seedDemoIfNeeded()).catch(err => console.error('[startup] failed:', err.message));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`R&R Project Tracker running on port ${PORT}`));

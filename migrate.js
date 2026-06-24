@@ -48,7 +48,7 @@ async function seedDemoIfNeeded() {
        VALUES ('D-100', 'DEMO - Riverside Plant Expansion', 'Demo / Walsh Group', 1250000, 980000, 'Joe Jenkins', 'In Fabrication', 'Approved', '2026-03-12', '2026-04-20', true, 'Sample project so you can explore the tracker. Safe to archive when you are done.')
        RETURNING id`);
     const id = pr.rows[0].id;
-    const hist = [['Bidding', '2026-01-15'], ['Submitted', '2026-02-02'], ['Awarded', '2026-03-12'], ['Purchasing', '2026-04-01'], ['In Fabrication', '2026-04-20']];
+    const hist = [['Awarded', '2026-03-12'], ['Purchasing', '2026-04-01'], ['In Fabrication', '2026-04-20']];
     for (const [st, dt] of hist) await client.query('INSERT INTO stage_history (project_id, status, changed_at) VALUES ($1, $2, $3)', [id, st, dt + 'T12:00:00Z']);
     await client.query("INSERT INTO deliveries (project_id, delivery_date, description, done, done_at, sort_order) VALUES ($1, '2026-06-05', 'Sequence 1 - columns & base plates', true, now(), 0)", [id]);
     await client.query("INSERT INTO deliveries (project_id, delivery_date, description, done, sort_order) VALUES ($1, '2026-07-15', 'Sequence 2 - beams & bracing', false, 1)", [id]);
@@ -66,4 +66,30 @@ async function seedDemoIfNeeded() {
   }
 }
 
-module.exports = { pool, runMigrations, seedDemoIfNeeded };
+
+async function runExtraMigrations() {
+  if (!process.env.DATABASE_URL) return;
+  const client = await pool.connect();
+  try {
+    await client.query(`CREATE TABLE IF NOT EXISTS project_notes (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      body text NOT NULL,
+      created_by uuid REFERENCES users(id),
+      created_at timestamptz NOT NULL DEFAULT now())`);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes (project_id)');
+    // Lifecycle now starts at Awarded; relax the status check and map old values.
+    await client.query("UPDATE projects SET status = 'Awarded' WHERE status IN ('Bidding', 'Submitted')");
+    await client.query("UPDATE projects SET status = 'On Hold' WHERE status = 'Lost/On Hold'");
+    await client.query('ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_status_check');
+    await client.query("DELETE FROM stage_history WHERE status IN ('Bidding', 'Submitted')");
+    await client.query("UPDATE stage_history SET status = 'On Hold' WHERE status = 'Lost/On Hold'");
+    console.log('[migrate] Extra migrations applied (notes table, status lifecycle).');
+  } catch (err) {
+    console.error('[migrate] extra migrations failed:', err.message);
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { pool, runMigrations, runExtraMigrations, seedDemoIfNeeded };
