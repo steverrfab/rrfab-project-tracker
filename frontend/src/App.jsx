@@ -321,7 +321,7 @@ function Detail({ id, user, onBack }) {
 
     <div className="cols">
       <div className="card" style={{ margin: 0 }}><h3>Activity</h3>
-        <ul className="feed">{feed.length ? feed.slice(0, 14).map((f, i) => <li key={i}><div className="ft"><span className={(f.open || f.note) ? 'clk' : ''} onClick={f.open ? () => setModal({ t: 'item', data: f.open }) : f.note ? () => setOpenN(o => ({ ...o, [i]: !o[i] })) : undefined}>{f.t}</span></div>{f.note && openN[i] && <div style={{ marginTop: 4, fontSize: 13, fontStyle: 'italic', background: '#f8f9fb', border: '1px solid var(--bd)', borderRadius: 8, padding: '8px 10px' }}>{f.body}</div>}<div className="fw">{fmtWhen(f.when)}{f.w ? ' · ' + f.w : ''}</div></li>) : <div className="empty">No activity yet.</div>}</ul>
+        <ul className="feed" style={{ maxHeight: 160, overflow: 'auto' }}>{feed.length ? feed.slice(0, 14).map((f, i) => <li key={i}><div className="ft"><span className={(f.open || f.note) ? 'clk' : ''} onClick={f.open ? () => setModal({ t: 'item', data: f.open }) : f.note ? () => setOpenN(o => ({ ...o, [i]: !o[i] })) : undefined}>{f.t}</span></div>{f.note && openN[i] && <div style={{ marginTop: 4, fontSize: 13, fontStyle: 'italic', background: '#f8f9fb', border: '1px solid var(--bd)', borderRadius: 8, padding: '8px 10px' }}>{f.body}</div>}<div className="fw">{fmtWhen(f.when)}{f.w ? ' · ' + f.w : ''}</div></li>) : <div className="empty">No activity yet.</div>}</ul>
       </div>
       <NotesCard projectId={id} notes={notes} onAdded={load} />
     </div>
@@ -357,7 +357,7 @@ function NotesCard({ projectId, notes, onAdded }) {
   const add = async () => { if (!body.trim()) return; setBusy(true); try { await api.send('POST', '/api/projects/' + projectId + '/notes', { body }); setBody(''); onAdded(); } catch (e) { alert(e.message); } setBusy(false); };
   return <div className="card" style={{ margin: 0 }}><h3>Notes &amp; conversation</h3>
     <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}><input style={{ flex: 1 }} placeholder="Add a note…" value={body} onChange={e => setBody(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} /><button className="btn-pri btn-sm" disabled={busy} onClick={add}>Add</button></div>
-    <div style={{ maxHeight: 320, overflow: 'auto' }}>{notes.length ? notes.map(n => <div className="li" key={n.id}><div className="grow">{n.body}<div className="muted" style={{ fontSize: 11, marginTop: 2 }}>{n.author || 'Someone'} · {fmtWhen(n.createdAt)}</div></div></div>) : <div className="empty">No notes yet.</div>}</div>
+    <div style={{ maxHeight: 160, overflow: 'auto' }}>{notes.length ? notes.map(n => <div className="li" key={n.id}><div className="grow">{n.body}<div className="muted" style={{ fontSize: 11, marginTop: 2 }}>{n.author || 'Someone'} · {fmtWhen(n.createdAt)}</div></div></div>) : <div className="empty">No notes yet.</div>}</div>
   </div>;
 }
 
