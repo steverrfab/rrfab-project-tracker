@@ -108,6 +108,8 @@ function toClient(p, deliveries) {
     })),
     notes: p.notes || '',
     createdAt: p.created_at ? new Date(p.created_at).toISOString() : '',
+    projectedStartDate: p.projected_start_date || '',
+    completedDate: p.completed_date || '',
   };
 }
 
@@ -173,10 +175,10 @@ app.post('/api/projects', auth.requireRole('super_admin', 'admin', 'pm'), async 
          job_number, name, customer, original_contract, cost, pm, status, drawing_status,
          bid_due_date, submitted_date, award_date, project_start_date, fab_start_date,
          galv_send_date, galv_return_date, paint_send_date, paint_complete_date,
-         material_ordered, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+         material_ordered, notes, projected_start_date, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        RETURNING id, status`,
-      [...projectValues(p), req.user.id]
+      [...projectValues(p), d(p.projectedStartDate), req.user.id]
     );
     const id = ins.rows[0].id;
     await replaceDeliveries(client, id, p.deliveries);
@@ -212,11 +214,13 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
          job_number=$1, name=$2, customer=$3, original_contract=$4, cost=$5, pm=$6, status=$7,
          drawing_status=$8, bid_due_date=$9, submitted_date=$10, award_date=$11,
          project_start_date=$12, fab_start_date=$13, galv_send_date=$14, galv_return_date=$15,
-         paint_send_date=$16, paint_complete_date=$17, material_ordered=$18, notes=$19
-       WHERE id=$20`,
-      [...projectValues(p), id]
+         paint_send_date=$16, paint_complete_date=$17, material_ordered=$18, notes=$19,
+         projected_start_date=$20
+       WHERE id=$21`,
+      [...projectValues(p), d(p.projectedStartDate), id]
     );
     await replaceDeliveries(client, id, p.deliveries);
+    if (p.status === 'Completed') await client.query('UPDATE projects SET completed_date = COALESCE(completed_date, CURRENT_DATE) WHERE id = $1', [id]);
     if (prev.rows[0].status !== p.status) {
       await client.query(
         'INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)',

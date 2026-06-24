@@ -78,6 +78,8 @@ async function runExtraMigrations() {
       created_by uuid REFERENCES users(id),
       created_at timestamptz NOT NULL DEFAULT now())`);
     await client.query('CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes (project_id)');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS projected_start_date date');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS completed_date date');
     // Lifecycle now starts at Awarded; relax the status check and map old values.
     await client.query("UPDATE projects SET status = 'Awarded' WHERE status IN ('Bidding', 'Submitted')");
     await client.query("UPDATE projects SET status = 'On Hold' WHERE status = 'Lost/On Hold'");
