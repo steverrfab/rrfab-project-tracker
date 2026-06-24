@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const { pool, runMigrations } = require('./migrate');
+const { pool, runMigrations, seedDemoIfNeeded } = require('./migrate');
 const auth = require('./auth');
 
 const app = express();
@@ -443,7 +443,7 @@ app.get('*', (req, res) => {
 });
 
 // Create the PostgreSQL tables on startup (non-fatal if it cannot connect).
-runMigrations().catch(err => console.error('[migrate] failed:', err.message));
+runMigrations().then(() => seedDemoIfNeeded()).catch(err => console.error('[startup] failed:', err.message));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`R&R Project Tracker running on port ${PORT}`));
