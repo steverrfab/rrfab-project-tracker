@@ -204,6 +204,7 @@ function Dashboard({ user, onOpen }) {
   const editor = can.editProject(user.role);
   const overdueCount = p => (p.deliveries || []).filter(d => !d.done && d.date && daysUntil(d.date) < 0).length;
   const quickStatus = async (p, status) => { try { await api.send('PUT', '/api/projects/' + p.id, { ...p, status }); load(); } catch (e) { alert(e.message); } };
+  const moveStage = async (pid, st) => { const pj = projects.find(x => x.id === pid); if (!pj || pj.status === st) return; try { await api.send('PUT', '/api/projects/' + pid, { ...pj, status: st }); load(); } catch (e) { alert(e.message); } };
 
   return <div className="wrap">
     {loading ? <div className="who" style={{ marginTop: 30 }}>Loading projects…</div> : <>
@@ -225,7 +226,7 @@ function Dashboard({ user, onOpen }) {
         <div className="filt"><label>Date filter</label><select value={df} onChange={e => setDf(e.target.value)}>{DATE_FIELDS.map(f => <option key={f}>{f}</option>)}</select><label>from</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} /><label>to</label><input type="date" value={to} onChange={e => setTo(e.target.value)} />{(from || to) && <button className="btn-ghost btn-sm" onClick={() => { setFrom(''); setTo(''); }}>Clear</button>}</div>
       </div>
 
-      {vw === 'board' ? <div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div><div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div></div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div>
+      {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? 'Drag a card to another column to change its stage.' : 'Read-only view.'}</div><div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div><div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div></div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div></>
         : <div className="panel"><table><thead><tr><th>Project</th><th>Contract</th><th>Margin</th><th>Status</th><th>Drawings</th><th>Deliveries</th><th>PM</th></tr></thead>
           <tbody>{list.length ? list.map(p => {
             const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
@@ -257,7 +258,7 @@ function ItemModal({ item, onClose }) {
 }
 
 function Detail({ id, user, onBack }) {
-  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [modal, setModal] = useState(null);
+  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({});
   const load = useCallback(async () => {
     const all = await api.get('/api/projects'); setP(all.find(x => x.id === id) || null);
     setHist(await api.get('/api/projects/' + id + '/stage-history'));
@@ -282,7 +283,7 @@ function Detail({ id, user, onBack }) {
   hist.forEach(h => feed.push({ when: h.changedAt, t: 'Moved to ' + h.status, w: h.changedBy }));
   invs.forEach(a => { if (a.submittedDate) feed.push({ when: a.submittedDate, t: 'Pay App #' + a.applicationNumber + ' submitted', open: { kind: 'payapp', data: a } }); if (a.paidDate) feed.push({ when: a.paidDate, t: 'Pay App #' + a.applicationNumber + ' paid ' + fmt$(a.amountPaid), open: { kind: 'payapp', data: a } }); });
   cos.forEach(c => { if (c.submittedDate) feed.push({ when: c.submittedDate, t: c.coNumber + ' ' + c.status + ' (' + fmt$(c.amount) + ')', open: { kind: 'co', data: c } }); });
-  notes.forEach(n => feed.push({ when: n.createdAt, t: n.body, w: n.author, note: true }));
+  notes.forEach(n => feed.push({ when: n.createdAt, t: 'Note added', w: n.author, note: true, body: n.body }));
   feed.sort((x, y) => new Date(y.when) - new Date(x.when));
 
   const dchips = [['Award', p.awardDate], ['Projected start', p.projectedStartDate], ['Fab', p.fabStartDate], ['Galv send', p.galvSendDate], ['Galv return', p.galvReturnDate], ['Paint', p.paintSendDate]].filter(r => r[1]);
@@ -314,7 +315,7 @@ function Detail({ id, user, onBack }) {
 
     <div className="cols">
       <div className="card" style={{ margin: 0 }}><h3>Activity</h3>
-        <ul className="feed">{feed.length ? feed.slice(0, 14).map((f, i) => <li key={i}><div className="ft"><span className={f.open ? 'clk' : ''} style={f.note ? { fontStyle: 'italic' } : {}} onClick={f.open ? () => setModal({ t: 'item', data: f.open }) : undefined}>{f.t}</span></div><div className="fw">{fmtWhen(f.when)}{f.w ? ' · ' + f.w : ''}</div></li>) : <div className="empty">No activity yet.</div>}</ul>
+        <ul className="feed">{feed.length ? feed.slice(0, 14).map((f, i) => <li key={i}><div className="ft"><span className={(f.open || f.note) ? 'clk' : ''} onClick={f.open ? () => setModal({ t: 'item', data: f.open }) : f.note ? () => setOpenN(o => ({ ...o, [i]: !o[i] })) : undefined}>{f.t}</span></div>{f.note && openN[i] && <div style={{ marginTop: 4, fontSize: 13, fontStyle: 'italic', background: '#f8f9fb', border: '1px solid var(--bd)', borderRadius: 8, padding: '8px 10px' }}>{f.body}</div>}<div className="fw">{fmtWhen(f.when)}{f.w ? ' · ' + f.w : ''}</div></li>) : <div className="empty">No activity yet.</div>}</ul>
       </div>
       <NotesCard projectId={id} notes={notes} onAdded={load} />
     </div>
