@@ -113,7 +113,7 @@ function AuthScreen({ mode, onDone }) {
   };
   return (
     <div className="center"><div className="authbox">
-      <h1>R&R <span style={{ color: '#e85d04' }}>Fabrication</span></h1>
+      <h1>RR <span style={{ color: '#e85d04' }}>Project Tracker</span></h1>
       <p>{setup ? 'Create the first administrator account.' : 'Sign in to the project tracker.'}</p>
       {setup && <div className="field"><label>Your name</label><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} /></div>}
       <div className="field"><label>Email</label><input type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} onKeyDown={e => e.key === 'Enter' && submit()} /></div>
@@ -452,16 +452,53 @@ function AddUserModal({ onClose, onSaved }) {
   </Modal>;
 }
 
+
+// ---------- GUIDE ----------
+const GUIDE_INTRO = 'RR Project Tracker shows the stage, schedule, billing, and documents for every job in one place, so anyone can see where a project stands without asking. Click any project to open it. The tabs filter by group; the table shows contract value, margin, status, deliveries, and PM.';
+const GUIDE_ROLES = {
+  super_admin: { label: 'Super Admin', summary: 'Full access to everything. You are the only Super Admin, and the only person who can change that account. You also add users and set their roles in Settings.' },
+  admin: { label: 'Admin', summary: 'Full access to projects, billing, documents, and user management. You can do everything except change the Super Admin account.' },
+  accounting: { label: 'Accounting', summary: 'You own billing: pay applications, recording payments, and change orders. You can see every job and all financials, but you do not move projects between stages.' },
+  pm: { label: 'PM', summary: 'You run the jobs: move projects between stages, edit project details, manage deliveries and change orders. Pay-app billing and payments are handled by Accounting.' },
+  shop: { label: 'Shop', summary: 'You can see every job status, schedule, and drawing status, and upload documents. Projects and billing are read-only for your role.' },
+};
+const HOWTOS = [
+  { k: 'stage', need: r => can.editProject(r), title: 'Move a job to the next stage', steps: ['Use the status dropdown on the dashboard, or open the job and use the status dropdown at the top.', 'Pick the new stage. It is stamped into Stage history with your name and the date.'] },
+  { k: 'project', need: r => can.editProject(r), title: 'Add or edit a project', steps: ['On the Projects tab, click + New project (or Edit on an open job).', 'Fill in the details and click Save.'] },
+  { k: 'co', need: r => can.editCO(r), title: 'Add a change order', steps: ['Open the job and find the Change orders card.', 'Click + Add C/O, set the amount and status. Approved or Paid change orders raise the contract sum automatically.'] },
+  { k: 'payapp', need: r => can.editPayApp(r), title: 'Add a pay application', steps: ['Open the job and find the Pay applications card.', 'Click + Add pay app, enter work completed to date and the retainage percent. The app calculates retainage and the current payment due for you.'] },
+  { k: 'payment', need: r => can.editPayApp(r), title: 'Record a payment', steps: ['On an unpaid pay app, click Record payment.', 'Enter the amount received and the date. It moves into the payment history and the Billing page.'] },
+  { k: 'doc', need: () => true, title: 'Upload or download a document', steps: ['Open the job and find the Documents card.', 'Click + Upload to add a file, or Download next to any existing file.'] },
+  { k: 'billing', need: () => true, title: 'See what is owed', steps: ['Open the Billing tab.', 'You will see billed to date, collected, outstanding A/R, overdue, retainage held, the paid history, and active jobs that may need billing.'] },
+  { k: 'users', need: r => can.seeSettings(r), title: 'Add a user', steps: ['Open the Settings tab.', 'Click + Add user, then set their name, email, a temporary password, and role.'] },
+];
+function Guide({ user }) {
+  const role = GUIDE_ROLES[user.role];
+  return <div className="wrap">
+    <h1 style={{ fontSize: 20, margin: '6px 0' }}>Guide</h1>
+    <div className="card"><h3>What this is</h3><div style={{ color: '#bbb', lineHeight: 1.6 }}>{GUIDE_INTRO}</div></div>
+    <div className="card"><h3>Your role: {role.label}</h3><div style={{ color: '#bbb', lineHeight: 1.6 }}>{role.summary}</div></div>
+    <div className="card"><h3>How to</h3>
+      {HOWTOS.filter(h => h.need(user.role)).map(h => <div key={h.k} style={{ marginBottom: 14 }}>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>{h.title}</div>
+        <ol style={{ margin: 0, paddingLeft: 18, color: '#aaa', lineHeight: 1.7 }}>{h.steps.map((st, i) => <li key={i}>{st}</li>)}</ol>
+      </div>)}
+    </div>
+    <div className="note" style={{ marginTop: 6 }}>This guide is kept up to date as features are added or change.</div>
+  </div>;
+}
+
 // ---------- MAIN ----------
 function Main({ user, onLogout }) {
   const [view, setView] = useState({ name: 'projects' });
   const nav = (name) => setView({ name });
   return <>
     <div className="top"><div className="topin">
-      <div className="logo">R&amp;R <span>Fabrication</span></div>
+      <div className="logo">RR <span>Project Tracker</span></div>
       <nav className="nav">
         <button className={'navbtn' + (view.name === 'projects' || view.name === 'detail' ? ' on' : '')} onClick={() => nav('projects')}>Projects</button>
         <button className={'navbtn' + (view.name === 'billing' ? ' on' : '')} onClick={() => nav('billing')}>Billing</button>
+        <button className={'navbtn' + (view.name === 'guide' ? ' on' : '')} onClick={() => nav('guide')}>Guide</button>
         {can.seeSettings(user.role) && <button className={'navbtn' + (view.name === 'settings' ? ' on' : '')} onClick={() => nav('settings')}>Settings</button>}
       </nav>
       <div className="spacer" />
@@ -475,12 +512,14 @@ function Main({ user, onLogout }) {
     {view.name === 'projects' && <Dashboard user={user} onOpen={id => setView({ name: 'detail', id })} />}
     {view.name === 'detail' && <Detail id={view.id} user={user} onBack={() => nav('projects')} />}
     {view.name === 'billing' && <Billing />}
+    {view.name === 'guide' && <Guide user={user} />}
     {view.name === 'settings' && can.seeSettings(user.role) && <Settings user={user} />}
   </>;
 }
 
 export default function App() {
   const [auth, setAuth] = useState(null);
+  useEffect(() => { document.title = 'RR Project Tracker'; }, []);
   const reload = useCallback(() => api.get('/api/auth/status').then(setAuth), []);
   useEffect(() => { reload(); }, [reload]);
   const logout = async () => { await api.send('POST', '/api/auth/logout'); reload(); };
