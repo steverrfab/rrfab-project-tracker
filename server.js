@@ -555,6 +555,78 @@ app.delete('/api/sequences/:seqId', auth.requireRole('super_admin', 'admin', 'pm
   catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// ====== IMPORT WON JOBS FROM THE BID TOOL (Step 3) ======
+// Admin-only. Pulls the bid tool's won-jobs feed and creates a project for any
+// job number not already in the tracker. Idempotent: existing job numbers skip.
+app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  const base = process.env.BID_API_URL;
+  const key = process.env.TRACKER_KEY;
+  if (!base || !key) return res.status(500).json({ error: 'Bid integration is not configured (BID_API_URL / TRACKER_KEY).' });
+  const baseUrl = base.endsWith('/') ? base.slice(0, -1) : base;
+  let feed;
+  try {
+    const r = await fetch(baseUrl + '/api/estimates/feed/won-jobs', { headers: { 'X-Integration-Key': key } });
+    if (!r.ok) return res.status(502).json({ error: 'Bid tool refused the request (status ' + r.status + ').' });
+    feed = await r.json();
+  } catch (err) {
+    return res.status(502).json({ error: 'Could not reach the bid tool: ' + err.message });
+  }
+  const jobs = (feed && feed.jobs) || [];
+  const client = await pool.connect();
+  const imported = [], skipped = [];
+  try {
+    await client.query('BEGIN');
+    for (const j of jobs) {
+      const jobNo = String(j.job_number || '').trim();
+      if (!jobNo) continue;
+      const exists = await client.query('SELECT 1 FROM projects WHERE job_number = $1 LIMIT 1', [jobNo]);
+      if (exists.rowCount) { skipped.push(jobNo); continue; }
+      const ins = await client.query(
+        'INSERT INTO projects (job_number, name, customer, original_contract, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9) RETURNING id',
+        [jobNo, j.project_name || ('Job ' + jobNo), d(j.client_gc), money(j.contract_amount), 'Awarded', d(String(j.won_at || '').slice(0, 10)), j.estimate_id || null, d(j.bid_number), req.user.id]);
+      await client.query('INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)', [ins.rows[0].id, 'Awarded', req.user.id]);
+      imported.push(jobNo);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+  res.json({ ok: true, importedCount: imported.length, skippedCount: skipped.length, imported, skipped });
+});
+
+// ====== ADMIN "IMPORT WON JOBS" PAGE (Step 4) ======
+// Lightweight standalone page so the import is one click. Visit /admin/import
+// while logged in as an admin. The POST it calls is admin-protected above.
+app.get('/admin/import', (req, res) => {
+  res.type('html').send(
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>Import won jobs - R&R Project Tracker</title>' +
+    '<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f4f6f9;color:#1c2430;margin:0;padding:40px;display:flex;justify-content:center}' +
+    '.card{background:#fff;border:1px solid #e2e7ee;border-radius:14px;padding:28px;max-width:560px;width:100%}' +
+    'h1{font-size:20px;margin:0 0 4px}p.sub{color:#6b7889;font-size:13px;margin:0 0 20px}' +
+    'button{background:#d98521;color:#3a2400;border:0;border-radius:9px;padding:12px 18px;font-size:15px;font-weight:700;cursor:pointer}' +
+    'button:disabled{opacity:.5;cursor:not-allowed}' +
+    '#out{margin-top:18px;font-size:14px;white-space:pre-wrap;line-height:1.5}' +
+    'a{color:#2f6fb0}</style></head><body><div class="card">' +
+    '<h1>Import won jobs</h1>' +
+    '<p class="sub">Pulls every won bid (with a job number) from R&R Bid and adds any new ones to the tracker at the Awarded stage. Running it again is safe; jobs already here are skipped.</p>' +
+    '<button id="b">Import won jobs</button><div id="out"></div>' +
+    '<p style="margin-top:22px"><a href="/">Back to the tracker</a></p>' +
+    '<script>' +
+    'var b=document.getElementById("b"),out=document.getElementById("out");' +
+    'b.onclick=async function(){b.disabled=true;out.textContent="Working...";' +
+    'try{var r=await fetch("/api/import/won-jobs",{method:"POST"});var j=await r.json();' +
+    'if(!r.ok){out.textContent=(r.status===401?"Please log in as an admin first, then reload this page.":(r.status===403?"You need an admin account to import.":("Error: "+(j.error||r.status))));b.disabled=false;return;}' +
+    'out.textContent="Imported "+j.importedCount+" job(s)"+(j.imported.length?": "+j.imported.join(", "):"")+".\\nSkipped "+j.skippedCount+" already in the tracker"+(j.skipped.length?": "+j.skipped.join(", "):"")+".";' +
+    'b.disabled=false;}catch(e){out.textContent="Could not reach the server: "+e.message;b.disabled=false;}};' +
+    '</script></div></body></html>'
+  );
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'frontend', 'dist', 'index.html'));
 });
