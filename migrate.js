@@ -98,6 +98,11 @@ async function runExtraMigrations() {
     // Archive bookkeeping: remember when a job was archived and by whom.
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS archived_at timestamptz');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS archived_by uuid REFERENCES users(id)');
+    // Bid tool integration: provenance for imported won jobs + no-duplicate guard.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_estimate_id integer');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_bid_number text');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS imported_at timestamptz');
+    await client.query("CREATE UNIQUE INDEX IF NOT EXISTS uniq_projects_job_number ON projects (job_number) WHERE job_number IS NOT NULL AND job_number <> ''");
     console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
