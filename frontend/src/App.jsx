@@ -22,6 +22,7 @@ const can = {
   editPayApp: r => ['super_admin', 'admin', 'accounting'].includes(r),
   upload: () => true,
   seeSettings: r => ['super_admin', 'admin'].includes(r),
+  archive: r => ['super_admin', 'admin'].includes(r),
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -283,7 +284,8 @@ function Detail({ id, user, onBack }) {
   const retHeld = last ? Number(last.retainageHeld) : 0;
   const totalPaid = invs.reduce((s, a) => s + Number(a.amountPaid || 0), 0);
   const gp = contractSum - (Number(p.cost) || 0); const gm = contractSum > 0 ? gp / contractSum * 100 : 0;
-  const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role); const eS = ['super_admin', 'admin', 'pm', 'shop'].includes(user.role);
+  const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role); const eS = ['super_admin', 'admin', 'pm', 'shop'].includes(user.role); const eA = can.archive(user.role);
+  const archive = async () => { if (!confirm('Archive ' + p.name + '?\n\nIt will be removed from the projects list and billing, but kept safely. An admin can restore it any time from the Archived page.')) return; try { await api.send('DELETE', '/api/projects/' + p.id); onBack(); } catch (e) { alert(e.message); } };
 
   const feed = [];
   hist.forEach(h => feed.push({ when: h.changedAt, t: 'Moved to ' + h.status, w: h.changedBy }));
@@ -303,7 +305,7 @@ function Detail({ id, user, onBack }) {
         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}><span className="chip">Drawings: {p.drawingStatus || 'N/A'}</span><span className="chip" style={p.materialOrdered ? { color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' } : {}}>Material {p.materialOrdered ? 'ordered ✓' : 'not ordered'}</span></div>
       </div>
       <div className="spacer" />
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{eP ? <select value={p.status} onChange={async e => { await api.send('PUT', '/api/projects/' + p.id, { ...p, status: e.target.value }); load(); }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}{eP && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'project', data: p })}>Edit</button>}</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{eP ? <select value={p.status} onChange={async e => { await api.send('PUT', '/api/projects/' + p.id, { ...p, status: e.target.value }); load(); }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}{eP && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'project', data: p })}>Edit</button>}{eA && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={archive}>Archive</button>}</div>
     </div>
 
     <div className="datestrip">
@@ -498,6 +500,7 @@ const HOWTOS = [
   { k: 'payapp', need: r => can.editPayApp(r), title: 'Add a pay application & record payment', steps: ['Open the job, Pay applications, + Add pay app; enter completed-to-date and retainage.', 'On an unpaid pay app, click Record payment.'] },
   { k: 'doc', need: () => true, title: 'Upload or download a document', steps: ['Open the job, find Documents.', 'Click + Upload, or Download next to any file.'] },
   { k: 'users', need: r => can.seeSettings(r), title: 'Add a user', steps: ['Open Settings, click + Add user.', 'Set name, email, a temporary password, and role.'] },
+  { k: 'archive', need: r => can.archive(r), title: 'Archive or permanently remove a job', steps: ['Open the job and click Archive to hide it from the projects list and billing. It is kept safely and can be restored.', 'Open the Archived page to Restore a job, or Delete forever to erase a test or mistake (and its billing) for good.'] },
 ];
 function Guide({ user }) {
   const role = GUIDE_ROLES[user.role];
@@ -507,6 +510,41 @@ function Guide({ user }) {
     <div className="card"><h3>How to</h3>{HOWTOS.filter(h => h.need(user.role)).map(h => <div key={h.k} style={{ marginBottom: 14 }}><div style={{ fontWeight: 700, marginBottom: 4 }}>{h.title}</div><ol style={{ margin: 0, paddingLeft: 18, color: 'var(--mut)', lineHeight: 1.7 }}>{h.steps.map((s, i) => <li key={i}>{s}</li>)}</ol></div>)}</div>
     <div className="note" style={{ marginTop: 6 }}>This guide is kept up to date as features change.</div>
   </div>;
+}
+
+function ArchivedJobs() {
+  const [rows, setRows] = useState([]); const [loading, setLoading] = useState(true); const [del, setDel] = useState(null);
+  const load = useCallback(() => api.get('/api/projects/archived').then(d => { setRows(Array.isArray(d) ? d : []); setLoading(false); }), []);
+  useEffect(() => { load(); }, [load]);
+  const restore = async p => { if (!confirm('Restore ' + p.name + ' to the projects list?')) return; try { await api.send('POST', '/api/projects/' + p.id + '/restore'); load(); } catch (e) { alert(e.message); } };
+  return <div className="wrap">
+    <h1 style={{ fontSize: 22, margin: '12px 0' }}>Archived jobs</h1>
+    <div className="note" style={{ margin: '-4px 0 12px', lineHeight: 1.6 }}>Archived jobs are hidden from the projects list and billing but kept safely. <b>Restore</b> brings a job and its billing back. <b>Delete forever</b> erases a job and all of its pay apps, change orders, and history permanently. Admins only.</div>
+    <div className="panel"><table><thead><tr><th>Project</th><th>Customer</th><th>Status</th><th className="right">Contract</th><th>Billing on it</th><th>Archived</th><th /></tr></thead>
+      <tbody>{loading ? <tr><td colSpan="7" className="empty">Loading…</td></tr> : rows.length ? rows.map(p => <tr key={p.id}>
+        <td>{p.jobNumber && <div className="joblabel">#{p.jobNumber}</div>}<div style={{ fontWeight: 700 }}>{p.name}</div></td>
+        <td className="muted">{p.customer || '—'}</td>
+        <td>{statusPill(p.status)}</td>
+        <td className="right num">{fmtK(p.contract)}</td>
+        <td className="muted">{p.invoiceCount} pay app{p.invoiceCount === 1 ? '' : 's'} · {p.coCount} C/O</td>
+        <td className="muted">{p.archivedAt ? fmtWhen(p.archivedAt) : '—'}{p.archivedBy ? ' · ' + p.archivedBy : ''}</td>
+        <td className="right" style={{ whiteSpace: 'nowrap' }}><button className="btn-ghost btn-sm" onClick={() => restore(p)}>Restore</button> <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => setDel(p)}>Delete forever</button></td>
+      </tr>) : <tr><td colSpan="7" className="empty">Nothing archived.</td></tr>}</tbody>
+    </table></div>
+    {del && <PermanentDeleteModal proj={del} onClose={() => setDel(null)} onDone={() => { setDel(null); load(); }} />}
+  </div>;
+}
+
+function PermanentDeleteModal({ proj, onClose, onDone }) {
+  const [text, setText] = useState(''); const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  const ok = text.trim() === (proj.name || '').trim();
+  const go = async () => { setBusy(true); setErr(null); try { await api.send('DELETE', '/api/projects/' + proj.id + '/permanent'); onDone(); } catch (e) { setErr(e.message); setBusy(false); } };
+  return <Modal onClose={onClose}><h2>Permanently delete this job?</h2>
+    <div className="note" style={{ marginBottom: 14, lineHeight: 1.6 }}>This erases <b>{proj.name}</b> and everything attached to it: {proj.invoiceCount} pay app{proj.invoiceCount === 1 ? '' : 's'}, {proj.coCount} change order{proj.coCount === 1 ? '' : 's'}, plus its stage history, sequences, and documents. This cannot be undone.</div>
+    <div className="field"><label>Type the project name to confirm</label><input value={text} onChange={e => setText(e.target.value)} placeholder={proj.name} /></div>
+    {err && <div className="err">{err}</div>}
+    <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" style={{ background: 'var(--r)' }} disabled={!ok || busy} onClick={go}>{busy ? 'Deleting…' : 'Delete forever'}</button></div>
+  </Modal>;
 }
 
 function Main({ user, onLogout }) {
@@ -519,6 +557,7 @@ function Main({ user, onLogout }) {
         <button className={'navbtn' + (view.name === 'projects' || view.name === 'detail' ? ' on' : '')} onClick={() => nav('projects')}>Projects</button>
         <button className={'navbtn' + (view.name === 'billing' ? ' on' : '')} onClick={() => nav('billing')}>Billing</button>
         <button className={'navbtn' + (view.name === 'guide' ? ' on' : '')} onClick={() => nav('guide')}>Guide</button>
+        {can.archive(user.role) && <button className={'navbtn' + (view.name === 'archived' ? ' on' : '')} onClick={() => nav('archived')}>Archived</button>}
         {can.seeSettings(user.role) && <button className={'navbtn' + (view.name === 'settings' ? ' on' : '')} onClick={() => nav('settings')}>Settings</button>}
       </nav>
       <div className="spacer" />
@@ -529,6 +568,7 @@ function Main({ user, onLogout }) {
     {view.name === 'detail' && <Detail id={view.id} user={user} onBack={() => nav('projects')} />}
     {view.name === 'billing' && <Billing />}
     {view.name === 'guide' && <Guide user={user} />}
+    {view.name === 'archived' && can.archive(user.role) && <ArchivedJobs />}
     {view.name === 'settings' && can.seeSettings(user.role) && <Settings />}
   </>;
 }
