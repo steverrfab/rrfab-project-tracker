@@ -95,7 +95,10 @@ async function runExtraMigrations() {
     await client.query('ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_status_check');
     await client.query("DELETE FROM stage_history WHERE status IN ('Bidding', 'Submitted')");
     await client.query("UPDATE stage_history SET status = 'On Hold' WHERE status = 'Lost/On Hold'");
-    console.log('[migrate] Extra migrations applied (notes table, status lifecycle).');
+    // Archive bookkeeping: remember when a job was archived and by whom.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS archived_at timestamptz');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS archived_by uuid REFERENCES users(id)');
+    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
   } finally {

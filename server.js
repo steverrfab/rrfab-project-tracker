@@ -238,10 +238,72 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
   }
 });
 
-// DELETE = archive (keep the record, just hide it)
-app.delete('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), async (req, res) => {
+// LIST archived projects (admins only). Includes small counts so the
+// "permanently delete" screen can warn how much billing goes with the job.
+app.get('/api/projects/archived', auth.requireRole('super_admin', 'admin'), async (req, res) => {
   try {
-    await pool.query('UPDATE projects SET is_archived = true WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query(
+      `SELECT p.id, p.job_number, p.name, p.customer, p.status, p.original_contract,
+              p.archived_at, u.name AS archived_by_name,
+              (SELECT count(*) FROM invoices i WHERE i.project_id = p.id)      AS invoice_count,
+              (SELECT count(*) FROM change_orders c WHERE c.project_id = p.id) AS co_count
+         FROM projects p
+         LEFT JOIN users u ON u.id = p.archived_by
+        WHERE p.is_archived = true
+        ORDER BY p.archived_at DESC NULLS LAST, p.created_at DESC`
+    );
+    res.json(rows.map(r => ({
+      id: r.id, jobNumber: r.job_number || '', name: r.name, customer: r.customer || '',
+      status: r.status, contract: r.original_contract,
+      archivedAt: r.archived_at, archivedBy: r.archived_by_name || '',
+      invoiceCount: Number(r.invoice_count) || 0, coCount: Number(r.co_count) || 0,
+    })));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE = archive (keep the record, just hide it). Admins only.
+app.delete('/api/projects/:id', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE projects SET is_archived = true, archived_at = now(), archived_by = $2 WHERE id = $1',
+      [req.params.id, req.user.id]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Project not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// RESTORE an archived project back to the active list. Admins only.
+app.post('/api/projects/:id/restore', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE projects SET is_archived = false, archived_at = NULL, archived_by = NULL WHERE id = $1',
+      [req.params.id]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Project not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PERMANENTLY delete a project and everything attached to it (pay apps,
+// change orders, stage history, deliveries, documents all cascade). This
+// truly erases the row and cannot be undone, so it is admins only and only
+// works on a job that has already been archived.
+app.delete('/api/projects/:id/permanent', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const chk = await pool.query('SELECT is_archived FROM projects WHERE id = $1', [req.params.id]);
+    if (chk.rowCount === 0) return res.status(404).json({ error: 'Project not found' });
+    if (!chk.rows[0].is_archived) return res.status(400).json({ error: 'Archive the job first, then permanently delete it.' });
+    await pool.query('DELETE FROM projects WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -498,7 +560,8 @@ app.get('*', (req, res) => {
 });
 
 // Create the PostgreSQL tables on startup (non-fatal if it cannot connect).
-runMigrations().then(() => runExtraMigrations()).then(() => seedDemoIfNeeded()).catch(err => console.error('[startup] failed:', err.message));
+// Demo seeding is intentionally turned off: real data only from here on.
+runMigrations().then(() => runExtraMigrations()).catch(err => console.error('[startup] failed:', err.message));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`R&R Project Tracker running on port ${PORT}`));
