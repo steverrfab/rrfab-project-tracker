@@ -572,8 +572,33 @@ function PermanentDeleteModal({ proj, onClose, onDone }) {
   </Modal>;
 }
 
+function ChangePasswordModal({ onClose }) {
+  const [v, setV] = useState({ p1: '', p2: '' });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [done, setDone] = useState(false);
+  const save = async () => {
+    if (v.p1.length < 6) { setErr('Password must be at least 6 characters.'); return; }
+    if (v.p1 !== v.p2) { setErr('The two passwords do not match.'); return; }
+    setBusy(true); setErr(null);
+    try { await api.send('POST', '/api/me/password', { newPassword: v.p1 }); setDone(true); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return <Modal onClose={onClose}><h2>Change password</h2>
+    {done ? <>
+      <div className="note" style={{ lineHeight: 1.6 }}>Your password has been updated. Use it the next time you sign in, including on jobs.rrfabrication.org.</div>
+      <div className="actions"><button className="btn-pri" onClick={onClose}>Done</button></div>
+    </> : <>
+      <div className="field"><label>New password</label><input type="password" value={v.p1} onChange={e => setV({ ...v, p1: e.target.value })} /></div>
+      <div className="field"><label>Confirm new password</label><input type="password" value={v.p2} onChange={e => setV({ ...v, p2: e.target.value })} onKeyDown={e => e.key === 'Enter' && save()} /></div>
+      <div className="note">At least 6 characters. This updates the password for your own account.</div>
+      {err && <div className="err">{err}</div>}
+      <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Update password'}</button></div>
+    </>}
+  </Modal>;
+}
+
 function Main({ user, onLogout }) {
   const [view, setView] = useState({ name: 'projects' });
+  const [pwOpen, setPwOpen] = useState(false);
   const nav = name => setView({ name });
   return <>
     <div className="top"><div className="topin">
@@ -587,6 +612,7 @@ function Main({ user, onLogout }) {
       </nav>
       <div className="spacer" />
       <span className="who">{user.name} · {ROLE_LABEL[user.role]}</span>
+      <button className="btn-ghost btn-sm" onClick={() => setPwOpen(true)}>Change password</button>
       <button className="btn-ghost btn-sm" onClick={onLogout}>Log out</button>
     </div></div>
     {view.name === 'projects' && <Dashboard user={user} onOpen={id => setView({ name: 'detail', id })} />}
@@ -595,6 +621,7 @@ function Main({ user, onLogout }) {
     {view.name === 'guide' && <Guide user={user} />}
     {view.name === 'archived' && can.archive(user.role) && <ArchivedJobs />}
     {view.name === 'settings' && can.seeSettings(user.role) && <Settings />}
+    {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} />}
   </>;
 }
 
