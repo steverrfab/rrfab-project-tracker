@@ -74,6 +74,17 @@ app.put('/api/users/:id', auth.requireRole('super_admin', 'admin'), async (req, 
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// Change your OWN password. Any signed-in user; being logged in is enough, so
+// someone who forgot their password but still has a session can reset it.
+app.post('/api/me/password', async (req, res) => {
+  const np = (req.body.newPassword || '').trim();
+  if (np.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  try {
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [auth.hashPassword(np), req.user.id]);
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 
 // helpers
 const d = v => (v === undefined || v === null || v === '') ? null : v;
