@@ -514,48 +514,25 @@ function Guide({ user }) {
 }
 
 function BidPullModal({ onClose, onDone }) {
-  const [state, setState] = useState({ loading: true });
-  const [ovr, setOvr] = useState({});
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [result, setResult] = useState(null);
-  useEffect(() => {
-    api.get('/api/bid-pull')
-      .then(d => { if (d && d.error) setState({ loading: false, error: d.error }); else setState({ loading: false, data: d }); })
-      .catch(e => setState({ loading: false, error: e.message }));
-  }, []);
-  const data = state.data;
-  const toggle = k => setOvr(o => ({ ...o, [k]: !o[k] }));
-  const createList = data ? data.toCreate.map(j => j.jobNumber) : [];
-  const overwriteList = data ? data.conflicts.filter(c => ovr[c.bid.jobNumber]).map(c => c.bid.jobNumber) : [];
-  const apply = async () => {
+  const run = async () => {
     setBusy(true); setErr(null);
-    try { const r = await api.send('POST', '/api/bid-pull/apply', { createJobNumbers: createList, overwriteJobNumbers: overwriteList }); setResult(r); }
+    try { const r = await api.send('POST', '/api/import/won-jobs'); setResult(r); }
     catch (e) { setErr(e.message); setBusy(false); }
   };
   return <Modal onClose={onClose}><h2>Pull from bid tool</h2>
-    {state.loading ? <div className="note">Checking the bid tool for won jobs…</div>
-    : state.error ? <><div className="err">{state.error}</div><div className="actions"><button className="btn-ghost" onClick={onClose}>Close</button></div></>
-    : result ? <>
-        <div className="calc"><div><span>New jobs added</span><span className="num">{result.created}</span></div><div><span>Existing jobs updated</span><span className="num">{result.updated}</span></div></div>
+    {result ? <>
+        <div className="calc">
+          <div><span>New jobs imported</span><span className="num">{result.importedCount}</span></div>
+          <div><span>Already in tracker (skipped)</span><span className="num">{result.skippedCount}</span></div>
+        </div>
+        {result.imported && result.imported.length > 0 && <div className="note" style={{ marginTop: 10 }}>Added: {result.imported.join(', ')}</div>}
         <div className="actions"><button className="btn-pri" onClick={onDone}>Done</button></div>
       </>
     : <>
-        <div className="card" style={{ margin: '0 0 12px', padding: 14 }}>
-          <h3 style={{ margin: '0 0 8px' }}>New won jobs to add ({createList.length})</h3>
-          {data.toCreate.length ? data.toCreate.map(j => <div className="li" key={j.jobNumber}><div className="grow"><span className="joblabel">#{j.jobNumber} </span><b>{j.projectName || 'Unnamed'}</b><div className="muted" style={{ fontSize: 12 }}>{j.clientGc || '—'}</div></div><div className="num" style={{ fontWeight: 700 }}>{fmt$(j.sellPrice)}</div></div>) : <div className="empty">No new won jobs to add.</div>}
-        </div>
-        {data.conflicts.length > 0 && <div className="card" style={{ margin: '0 0 12px', padding: 14 }}>
-          <h3 style={{ margin: '0 0 8px' }}>Already in the tracker ({data.conflicts.length})</h3>
-          <div className="note" style={{ marginBottom: 8 }}>Check any you want to overwrite with the bid's name, customer, and price. Unchecked jobs are left untouched.</div>
-          {data.conflicts.map(c => <label className="li" key={c.bid.jobNumber} style={{ alignItems: 'flex-start', cursor: 'pointer' }}>
-            <input type="checkbox" checked={!!ovr[c.bid.jobNumber]} onChange={() => toggle(c.bid.jobNumber)} style={{ marginTop: 4 }} />
-            <div className="grow"><span className="joblabel">#{c.bid.jobNumber} </span><b>{c.bid.projectName || c.current.name}</b>
-              <div className="muted" style={{ fontSize: 12 }}>Now: {c.current.name} · {c.current.customer || '—'} · {fmt$(c.current.sellPrice)}{c.current.archived ? ' · (archived)' : ''}</div>
-              <div className="muted" style={{ fontSize: 12 }}>Bid: {c.bid.projectName || '—'} · {c.bid.clientGc || '—'} · {fmt$(c.bid.sellPrice)}</div>
-            </div>
-          </label>)}
-        </div>}
-        {err && <div className="err">{err}</div>}
-        <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy || (createList.length === 0 && overwriteList.length === 0)} onClick={apply}>{busy ? 'Working…' : 'Add ' + createList.length + ' new' + (overwriteList.length ? ' · overwrite ' + overwriteList.length : '')}</button></div>
+        <div className="note" style={{ lineHeight: 1.6 }}>This pulls every won bid that has a job number from the bid tool and adds any new ones to the tracker at the Awarded stage. Jobs already here are skipped, so running it again is safe.</div>
+        {err && <div className="err" style={{ marginTop: 10 }}>{err}</div>}
+        <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={run}>{busy ? 'Importing…' : 'Import won jobs'}</button></div>
       </>}
   </Modal>;
 }
