@@ -103,6 +103,14 @@ async function runExtraMigrations() {
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_bid_number text');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS imported_at timestamptz');
     await client.query("CREATE UNIQUE INDEX IF NOT EXISTS uniq_projects_job_number ON projects (job_number) WHERE job_number IS NOT NULL AND job_number <> ''");
+    await client.query(`CREATE TABLE IF NOT EXISTS password_resets (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token text NOT NULL,
+      expires_at timestamptz NOT NULL,
+      used boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now())`);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets (token)');
     console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);

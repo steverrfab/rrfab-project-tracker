@@ -2,6 +2,8 @@ const express = require('express');
 const path = require('path');
 const { pool, runMigrations, runExtraMigrations, seedDemoIfNeeded } = require('./migrate');
 const auth = require('./auth');
+const mailer = require('./mailer');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
@@ -40,6 +42,53 @@ app.post('/api/auth/login', async (req, res) => {
 });
 app.post('/api/auth/logout', (req, res) => { auth.clearAuthCookie(res); res.json({ ok: true }); });
 
+// Forgot password: email a reset link. Generic response so it never reveals
+// which emails exist (except a clear message if email is not set up at all).
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: 'Enter your email.' });
+  try {
+    const u = (await pool.query('SELECT id, name, email, is_active FROM users WHERE email = $1', [email])).rows[0];
+    if (u && u.is_active) {
+      const token = crypto.randomBytes(32).toString('hex');
+      const expires = new Date(Date.now() + 60 * 60 * 1000);
+      await pool.query('INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, $3)', [u.id, token, expires]);
+      const base = (process.env.PUBLIC_URL || ((req.get('x-forwarded-proto') || 'https') + '://' + req.get('host'))).replace(/\/+$/, '');
+      const link = base + '/reset?token=' + token;
+      try {
+        await mailer.sendMail({
+          to: u.email,
+          subject: 'Reset your R&R Project Tracker password',
+          html: '<p>Hi ' + (u.name || '') + ',</p><p>Click the link below to set a new password. It expires in 1 hour.</p><p><a href="' + link + '">' + link + '</a></p><p>If you did not request this, you can ignore this email.</p>',
+          text: 'Reset your password (expires in 1 hour): ' + link,
+        });
+      } catch (e) {
+        console.error('[forgot] email failed:', e.message);
+        if (!mailer.isConfigured()) return res.status(503).json({ error: 'Email is not set up on the server yet. Ask an admin to reset your password from Settings.' });
+        return res.status(502).json({ error: 'Could not send the reset email right now. Try again later, or ask an admin to reset it.' });
+      }
+    } else if (!mailer.isConfigured()) {
+      return res.status(503).json({ error: 'Email is not set up on the server yet. Ask an admin to reset your password from Settings.' });
+    }
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
+// Reset password using the emailed token.
+app.post('/api/auth/reset-password', async (req, res) => {
+  const token = String(req.body.token || '').trim();
+  const np = String(req.body.newPassword || '').trim();
+  if (!token) return res.status(400).json({ error: 'Missing reset token.' });
+  if (np.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  try {
+    const row = (await pool.query('SELECT * FROM password_resets WHERE token = $1', [token])).rows[0];
+    if (!row || row.used || new Date(row.expires_at).getTime() < Date.now()) return res.status(400).json({ error: 'This reset link is invalid or has expired. Request a new one.' });
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [auth.hashPassword(np), row.user_id]);
+    await pool.query('UPDATE password_resets SET used = true WHERE id = $1', [row.id]);
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+
 // Everything else under /api requires a logged-in user.
 app.use('/api', auth.requireAuth);
 
@@ -70,17 +119,6 @@ app.put('/api/users/:id', auth.requireRole('super_admin', 'admin'), async (req, 
     await pool.query(
       'UPDATE users SET name = COALESCE($1, name), role = $2, is_active = $3, password_hash = COALESCE($4, password_hash) WHERE id = $5',
       [name || null, newRole, active != null ? !!active : target.is_active, password ? auth.hashPassword(password) : null, req.params.id]);
-    res.json({ ok: true });
-  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
-});
-
-// Change your OWN password. Any signed-in user; being logged in is enough, so
-// someone who forgot their password but still has a session can reset it.
-app.post('/api/me/password', async (req, res) => {
-  const np = (req.body.newPassword || '').trim();
-  if (np.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
-  try {
-    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [auth.hashPassword(np), req.user.id]);
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
