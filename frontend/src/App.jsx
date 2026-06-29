@@ -214,7 +214,7 @@ function Dashboard({ user, onOpen }) {
 
   return <div className="wrap">
     {loading ? <div className="who" style={{ marginTop: 30 }}>Loading projects…</div> : <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}><h1 style={{ fontSize: 22, margin: 0 }}>Projects</h1><div className="spacer" />{editor && <button className="btn-pri" onClick={() => setModal({ project: blankProject() })}>+ New project</button>}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}><h1 style={{ fontSize: 22, margin: 0 }}>Projects</h1><div className="spacer" />{can.archive(user.role) && <button className="btn-ghost" onClick={() => setModal({ bidPull: true })}>Pull from bid tool</button>}{editor && <button className="btn-pri" onClick={() => setModal({ project: blankProject() })}>+ New project</button>}</div>
       <div className="stats">
         <div className="stat"><div className="l">Active jobs</div><div className="v">{active.length}</div><div className="s">in production</div></div>
         <div className="stat"><div className="l">Active value</div><div className="v num">{fmtK(activeVal)}</div><div className="s">contract sum, in production</div></div>
@@ -248,7 +248,8 @@ function Dashboard({ user, onOpen }) {
           }) : <tr><td colSpan="7" className="empty">No projects match.</td></tr>}</tbody>
         </table></div>}
     </>}
-    {modal && <ProjectModal initial={modal.project} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
+    {modal && modal.project && <ProjectModal initial={modal.project} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
+    {modal && modal.bidPull && <BidPullModal onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
   </div>;
 }
 
@@ -510,6 +511,53 @@ function Guide({ user }) {
     <div className="card"><h3>How to</h3>{HOWTOS.filter(h => h.need(user.role)).map(h => <div key={h.k} style={{ marginBottom: 14 }}><div style={{ fontWeight: 700, marginBottom: 4 }}>{h.title}</div><ol style={{ margin: 0, paddingLeft: 18, color: 'var(--mut)', lineHeight: 1.7 }}>{h.steps.map((s, i) => <li key={i}>{s}</li>)}</ol></div>)}</div>
     <div className="note" style={{ marginTop: 6 }}>This guide is kept up to date as features change.</div>
   </div>;
+}
+
+function BidPullModal({ onClose, onDone }) {
+  const [state, setState] = useState({ loading: true });
+  const [ovr, setOvr] = useState({});
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [result, setResult] = useState(null);
+  useEffect(() => {
+    api.get('/api/bid-pull')
+      .then(d => { if (d && d.error) setState({ loading: false, error: d.error }); else setState({ loading: false, data: d }); })
+      .catch(e => setState({ loading: false, error: e.message }));
+  }, []);
+  const data = state.data;
+  const toggle = k => setOvr(o => ({ ...o, [k]: !o[k] }));
+  const createList = data ? data.toCreate.map(j => j.jobNumber) : [];
+  const overwriteList = data ? data.conflicts.filter(c => ovr[c.bid.jobNumber]).map(c => c.bid.jobNumber) : [];
+  const apply = async () => {
+    setBusy(true); setErr(null);
+    try { const r = await api.send('POST', '/api/bid-pull/apply', { createJobNumbers: createList, overwriteJobNumbers: overwriteList }); setResult(r); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return <Modal onClose={onClose}><h2>Pull from bid tool</h2>
+    {state.loading ? <div className="note">Checking the bid tool for won jobs…</div>
+    : state.error ? <><div className="err">{state.error}</div><div className="actions"><button className="btn-ghost" onClick={onClose}>Close</button></div></>
+    : result ? <>
+        <div className="calc"><div><span>New jobs added</span><span className="num">{result.created}</span></div><div><span>Existing jobs updated</span><span className="num">{result.updated}</span></div></div>
+        <div className="actions"><button className="btn-pri" onClick={onDone}>Done</button></div>
+      </>
+    : <>
+        <div className="card" style={{ margin: '0 0 12px', padding: 14 }}>
+          <h3 style={{ margin: '0 0 8px' }}>New won jobs to add ({createList.length})</h3>
+          {data.toCreate.length ? data.toCreate.map(j => <div className="li" key={j.jobNumber}><div className="grow"><span className="joblabel">#{j.jobNumber} </span><b>{j.projectName || 'Unnamed'}</b><div className="muted" style={{ fontSize: 12 }}>{j.clientGc || '—'}</div></div><div className="num" style={{ fontWeight: 700 }}>{fmt$(j.sellPrice)}</div></div>) : <div className="empty">No new won jobs to add.</div>}
+        </div>
+        {data.conflicts.length > 0 && <div className="card" style={{ margin: '0 0 12px', padding: 14 }}>
+          <h3 style={{ margin: '0 0 8px' }}>Already in the tracker ({data.conflicts.length})</h3>
+          <div className="note" style={{ marginBottom: 8 }}>Check any you want to overwrite with the bid's name, customer, and price. Unchecked jobs are left untouched.</div>
+          {data.conflicts.map(c => <label className="li" key={c.bid.jobNumber} style={{ alignItems: 'flex-start', cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!ovr[c.bid.jobNumber]} onChange={() => toggle(c.bid.jobNumber)} style={{ marginTop: 4 }} />
+            <div className="grow"><span className="joblabel">#{c.bid.jobNumber} </span><b>{c.bid.projectName || c.current.name}</b>
+              <div className="muted" style={{ fontSize: 12 }}>Now: {c.current.name} · {c.current.customer || '—'} · {fmt$(c.current.sellPrice)}{c.current.archived ? ' · (archived)' : ''}</div>
+              <div className="muted" style={{ fontSize: 12 }}>Bid: {c.bid.projectName || '—'} · {c.bid.clientGc || '—'} · {fmt$(c.bid.sellPrice)}</div>
+            </div>
+          </label>)}
+        </div>}
+        {err && <div className="err">{err}</div>}
+        <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy || (createList.length === 0 && overwriteList.length === 0)} onClick={apply}>{busy ? 'Working…' : 'Add ' + createList.length + ' new' + (overwriteList.length ? ' · overwrite ' + overwriteList.length : '')}</button></div>
+      </>}
+  </Modal>;
 }
 
 function ArchivedJobs() {
