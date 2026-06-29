@@ -137,7 +137,22 @@ function AuthScreen({ mode, onDone }) {
   const setup = mode === 'setup';
   const [f, setF] = useState({ name: '', email: '', password: '' });
   const [err, setErr] = useState(null); const [busy, setBusy] = useState(false);
+  const [forgot, setForgot] = useState(false); const [sent, setSent] = useState(false);
   const submit = async () => { setBusy(true); setErr(null); try { await api.send('POST', setup ? '/api/auth/setup' : '/api/auth/login', f); onDone(); } catch (e) { setErr(e.message); setBusy(false); } };
+  const sendReset = async () => { setBusy(true); setErr(null); try { await api.send('POST', '/api/auth/forgot-password', { email: f.email }); setSent(true); setBusy(false); } catch (e) { setErr(e.message); setBusy(false); } };
+  if (!setup && forgot) return <div className="center"><div className="authbox">
+    <h1><span className="dot" />RR Project Tracker</h1>
+    <p>Reset your password.</p>
+    {sent ? <>
+      <div className="note" style={{ lineHeight: 1.6 }}>If an account exists for that email, a reset link is on its way. The link expires in 1 hour.</div>
+      <button className="btn-ghost" style={{ width: '100%', marginTop: 14 }} onClick={() => { setForgot(false); setSent(false); setErr(null); }}>Back to sign in</button>
+    </> : <>
+      <div className="field"><label>Email</label><input type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} onKeyDown={e => e.key === 'Enter' && sendReset()} /></div>
+      {err && <div className="err">{err}</div>}
+      <button className="btn-pri" style={{ width: '100%', marginTop: 6 }} disabled={busy} onClick={sendReset}>{busy ? 'Sending…' : 'Send reset link'}</button>
+      <div style={{ textAlign: 'center', marginTop: 12 }}><span className="back" onClick={() => { setForgot(false); setErr(null); }}>Back to sign in</span></div>
+    </>}
+  </div></div>;
   return <div className="center"><div className="authbox">
     <h1><span className="dot" />RR Project Tracker</h1>
     <p>{setup ? 'Create the first administrator account.' : 'Sign in to continue.'}</p>
@@ -146,6 +161,7 @@ function AuthScreen({ mode, onDone }) {
     <div className="field"><label>Password</label><input type="password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} onKeyDown={e => e.key === 'Enter' && submit()} /></div>
     {err && <div className="err">{err}</div>}
     <button className="btn-pri" style={{ width: '100%', marginTop: 6 }} disabled={busy} onClick={submit}>{busy ? 'Please wait…' : setup ? 'Create account & sign in' : 'Sign in'}</button>
+    {!setup && <div style={{ textAlign: 'center', marginTop: 12 }}><span className="back" onClick={() => { setForgot(true); setErr(null); }}>Forgot password?</span></div>}
   </div></div>;
 }
 
@@ -457,16 +473,34 @@ function Billing() {
 }
 
 function Settings() {
-  const [users, setUsers] = useState([]); const [modal, setModal] = useState(false);
+  const [users, setUsers] = useState([]); const [modal, setModal] = useState(false); const [edit, setEdit] = useState(null);
   const load = useCallback(() => api.get('/api/users').then(setUsers), []);
   useEffect(() => { load(); }, [load]);
   return <div className="wrap"><h1 style={{ fontSize: 22, margin: '12px 0' }}>Settings</h1>
     <div className="card"><h3>Users &amp; roles <button className="btn-pri btn-sm" onClick={() => setModal(true)}>+ Add user</button></h3>
-      <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>{users.map(u => <tr key={u.id}><td><b>{u.name}</b></td><td className="muted">{u.email}</td><td>{ROLE_LABEL[u.role]}</td><td>{u.active ? <span className="g">Active</span> : <span className="muted">Disabled</span>}</td></tr>)}</tbody></table>
-      <div className="note" style={{ marginTop: 10 }}>Only one Super Admin exists. Admins manage everyone else. New users sign in with the temporary password you set.</div>
+      <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th /></tr></thead><tbody>{users.map(u => <tr key={u.id}><td><b>{u.name}</b></td><td className="muted">{u.email}</td><td>{ROLE_LABEL[u.role]}</td><td>{u.active ? <span className="g">Active</span> : <span className="muted">Disabled</span>}</td><td className="right"><button className="btn-ghost btn-sm" onClick={() => setEdit(u)}>Edit</button></td></tr>)}</tbody></table>
+      <div className="note" style={{ marginTop: 10 }}>Use Edit to reset anyone's password, change their role, or disable them. New users sign in with the temporary password you set, and can change it later via Forgot password.</div>
     </div>
     {modal && <AddUserModal onClose={() => setModal(false)} onSaved={() => { setModal(false); load(); }} />}
+    {edit && <EditUserModal user={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
   </div>;
+}
+
+function EditUserModal({ user, onClose, onSaved }) {
+  const [u, setU] = useState({ name: user.name || '', role: user.role, active: user.active, password: '' });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  const set = k => e => setU({ ...u, [k]: e.target.value });
+  const isSuper = user.role === 'super_admin';
+  const save = async () => { setBusy(true); setErr(null); try { await api.send('PUT', '/api/users/' + user.id, { name: u.name, role: u.role, active: u.active, password: u.password ? u.password : undefined }); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
+  return <Modal onClose={onClose}><h2>Edit user</h2>
+    <div className="field"><label>Name</label><input value={u.name} onChange={set('name')} /></div>
+    <div className="field"><label>Email</label><input value={user.email} disabled /></div>
+    {!isSuper && <div className="row2"><div className="field"><label>Role</label><select value={u.role} onChange={set('role')}><option value="admin">Admin</option><option value="accounting">Accounting</option><option value="pm">PM</option><option value="shop">Shop</option></select></div><div className="field"><label>Status</label><select value={u.active ? 'yes' : 'no'} onChange={e => setU({ ...u, active: e.target.value === 'yes' })}><option value="yes">Active</option><option value="no">Disabled</option></select></div></div>}
+    <div className="field"><label>Reset password</label><input type="text" value={u.password} onChange={set('password')} placeholder="Leave blank to keep current" /></div>
+    <div className="note">Type a new password to reset this person's login, then tell them what it is. Leave blank to keep their current one.</div>
+    {err && <div className="err">{err}</div>}
+    <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save</button></div>
+  </Modal>;
 }
 
 function AddUserModal({ onClose, onSaved }) {
@@ -572,33 +606,34 @@ function PermanentDeleteModal({ proj, onClose, onDone }) {
   </Modal>;
 }
 
-function ChangePasswordModal({ onClose }) {
+function ResetPassword({ token }) {
   const [v, setV] = useState({ p1: '', p2: '' });
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [done, setDone] = useState(false);
   const save = async () => {
     if (v.p1.length < 6) { setErr('Password must be at least 6 characters.'); return; }
     if (v.p1 !== v.p2) { setErr('The two passwords do not match.'); return; }
     setBusy(true); setErr(null);
-    try { await api.send('POST', '/api/me/password', { newPassword: v.p1 }); setDone(true); }
+    try { await api.send('POST', '/api/auth/reset-password', { token, newPassword: v.p1 }); setDone(true); }
     catch (e) { setErr(e.message); setBusy(false); }
   };
-  return <Modal onClose={onClose}><h2>Change password</h2>
+  return <div className="center"><div className="authbox">
+    <h1><span className="dot" />RR Project Tracker</h1>
     {done ? <>
-      <div className="note" style={{ lineHeight: 1.6 }}>Your password has been updated. Use it the next time you sign in, including on jobs.rrfabrication.org.</div>
-      <div className="actions"><button className="btn-pri" onClick={onClose}>Done</button></div>
+      <p>Password updated.</p>
+      <div className="note" style={{ lineHeight: 1.6 }}>Your new password is set. You can sign in now.</div>
+      <button className="btn-pri" style={{ width: '100%', marginTop: 14 }} onClick={() => { window.location.href = '/'; }}>Go to sign in</button>
     </> : <>
+      <p>Set a new password.</p>
       <div className="field"><label>New password</label><input type="password" value={v.p1} onChange={e => setV({ ...v, p1: e.target.value })} /></div>
       <div className="field"><label>Confirm new password</label><input type="password" value={v.p2} onChange={e => setV({ ...v, p2: e.target.value })} onKeyDown={e => e.key === 'Enter' && save()} /></div>
-      <div className="note">At least 6 characters. This updates the password for your own account.</div>
       {err && <div className="err">{err}</div>}
-      <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Update password'}</button></div>
+      <button className="btn-pri" style={{ width: '100%', marginTop: 6 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Update password'}</button>
     </>}
-  </Modal>;
+  </div></div>;
 }
 
 function Main({ user, onLogout }) {
   const [view, setView] = useState({ name: 'projects' });
-  const [pwOpen, setPwOpen] = useState(false);
   const nav = name => setView({ name });
   return <>
     <div className="top"><div className="topin">
@@ -612,7 +647,6 @@ function Main({ user, onLogout }) {
       </nav>
       <div className="spacer" />
       <span className="who">{user.name} · {ROLE_LABEL[user.role]}</span>
-      <button className="btn-ghost btn-sm" onClick={() => setPwOpen(true)}>Change password</button>
       <button className="btn-ghost btn-sm" onClick={onLogout}>Log out</button>
     </div></div>
     {view.name === 'projects' && <Dashboard user={user} onOpen={id => setView({ name: 'detail', id })} />}
@@ -621,7 +655,6 @@ function Main({ user, onLogout }) {
     {view.name === 'guide' && <Guide user={user} />}
     {view.name === 'archived' && can.archive(user.role) && <ArchivedJobs />}
     {view.name === 'settings' && can.seeSettings(user.role) && <Settings />}
-    {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} />}
   </>;
 }
 
@@ -631,8 +664,9 @@ export default function App() {
   const reload = useCallback(() => api.get('/api/auth/status').then(setAuth), []);
   useEffect(() => { reload(); }, [reload]);
   const logout = async () => { await api.send('POST', '/api/auth/logout'); reload(); };
+  const resetToken = (typeof window !== 'undefined' && window.location.pathname.replace(/\/+$/, '') === '/reset') ? new URLSearchParams(window.location.search).get('token') : null;
   return <>
     <style>{CSS}</style>
-    {!auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" onDone={reload} /> : <Main user={auth.user} onLogout={logout} />}
+    {resetToken ? <ResetPassword token={resetToken} /> : !auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" onDone={reload} /> : <Main user={auth.user} onLogout={logout} />}
   </>;
 }
