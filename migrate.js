@@ -111,6 +111,13 @@ async function runExtraMigrations() {
       used boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now())`);
     await client.query('CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets (token)');
+    // Who gets emailed when a new job lands in the tracker (managed in-app by admins).
+    await client.query(`CREATE TABLE IF NOT EXISTS tracker_notification_recipients (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      email text NOT NULL UNIQUE,
+      name text NOT NULL DEFAULT '',
+      active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now())`);
     console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);

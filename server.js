@@ -89,6 +89,34 @@ app.post('/api/auth/reset-password', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
+// ====== RECEIVE ONE WON JOB (real-time push from the bid tool) ======
+// The bid tool calls this the instant a bid is marked Won with a job number.
+// Protected by the shared TRACKER_KEY (same secret as the pull feed), NOT a user
+// login, so it is registered here ABOVE the /api login guard. Idempotent on
+// job_number: a repeat call for a job already present changes nothing.
+app.post('/api/integration/won-job', async (req, res) => {
+  const key = process.env.TRACKER_KEY || '';
+  const provided = req.get('X-Integration-Key') || '';
+  if (!key || provided !== key) return res.status(401).json({ error: 'invalid integration key' });
+  const j = req.body || {};
+  const jobNo = String(j.job_number || '').trim();
+  if (!jobNo) return res.status(400).json({ error: 'job_number is required' });
+  const client = await pool.connect();
+  let newId;
+  try {
+    newId = await createProjectFromWonJob(client, j, null);
+  } catch (err) {
+    console.error('[won-job] failed:', err);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+  if (!newId) return res.json({ ok: true, created: false, job_number: jobNo, message: 'already in the tracker' });
+  notifyNewProject({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount })
+    .catch(e => console.error('[notify] failed:', e.message));
+  res.json({ ok: true, created: true, job_number: jobNo, project_id: newId });
+});
+
 // Everything else under /api requires a logged-in user.
 app.use('/api', auth.requireAuth);
 
@@ -604,9 +632,63 @@ app.delete('/api/sequences/:seqId', auth.requireRole('super_admin', 'admin', 'pm
   catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
-// ====== IMPORT WON JOBS FROM THE BID TOOL (Step 3) ======
-// Admin-only. Pulls the bid tool's won-jobs feed and creates a project for any
-// job number not already in the tracker. Idempotent: existing job numbers skip.
+// Email everyone on the tracker's notification list that a new job has landed.
+// Defensive by design: if email is not configured, the recipient table is not
+// there yet, or nobody is on the list, it simply does nothing. It never throws
+// into the caller, so a mail problem can never block creating a project.
+async function notifyNewProject(p) {
+  try {
+    if (!mailer.isConfigured()) return;
+    let recips = [];
+    try {
+      recips = (await pool.query('SELECT email, name FROM tracker_notification_recipients WHERE active = true')).rows;
+    } catch (_) { return; } // table not created yet
+    if (!recips.length) return;
+    const amt = money(p.contract_amount);
+    const contract = amt == null ? '' : ('USD ' + amt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    const base = (process.env.PUBLIC_URL || '').replace(/[\/]+$/, '');
+    const link = base ? (base + '/') : '';
+    const subject = 'New job ' + p.job_number + ' - ' + (p.name || '');
+    const rows = [
+      ['Job number', p.job_number],
+      ['Project', p.name || ''],
+      ['Customer', p.customer || ''],
+      ['Contract', contract],
+    ].filter(r => r[1] !== '' && r[1] != null)
+      .map(r => '<tr><td style="padding:4px 12px 4px 0;color:#6b7889">' + r[0] + '</td><td style="padding:4px 0;font-weight:600">' + r[1] + '</td></tr>').join('');
+    const html = '<p>A new job has been added to the R&R Project Tracker at the <b>Awarded</b> stage.</p>' +
+      '<table style="border-collapse:collapse;font-size:14px">' + rows + '</table>' +
+      (link ? ('<p style="margin-top:16px"><a href="' + link + '">Open the tracker</a></p>') : '');
+    const text = 'A new job has been added to the R&R Project Tracker (Awarded stage).\n' +
+      'Job number: ' + p.job_number + '\nProject: ' + (p.name || '') + '\nCustomer: ' + (p.customer || '') + (contract ? ('\nContract: ' + contract) : '') + (link ? ('\n\nOpen the tracker: ' + link) : '');
+    for (const r of recips) {
+      try { await mailer.sendMail({ to: r.email, subject, html, text }); }
+      catch (e) { console.error('[notify] send to ' + r.email + ' failed:', e.message); }
+    }
+  } catch (e) {
+    console.error('[notify] error:', e.message);
+  }
+}
+
+// Shared by the pull import and the real-time push. Creates one project at the
+// 'Awarded' stage from a won bid, keyed on job_number so the same job can never
+// create two projects. Returns the new project id, or null if a project with
+// that job number already exists (nothing is changed in that case).
+async function createProjectFromWonJob(client, j, createdBy) {
+  const jobNo = String(j.job_number || '').trim();
+  if (!jobNo) return null;
+  const exists = await client.query('SELECT 1 FROM projects WHERE job_number = $1 LIMIT 1', [jobNo]);
+  if (exists.rowCount) return null;
+  const ins = await client.query(
+    'INSERT INTO projects (job_number, name, customer, original_contract, cost, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10) RETURNING id',
+    [jobNo, j.project_name || ('Job ' + jobNo), d(j.client_gc), money(j.contract_amount), money(j.cost), 'Awarded', d(String(j.won_at || '').slice(0, 10)), j.estimate_id || null, d(j.bid_number), createdBy || null]);
+  await client.query('INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)', [ins.rows[0].id, 'Awarded', createdBy || null]);
+  return ins.rows[0].id;
+}
+
+// ====== IMPORT WON JOBS FROM THE BID TOOL (manual pull, admin-only) ======
+// Pulls the bid tool's won-jobs feed and creates a project for any job number
+// not already in the tracker. Idempotent: existing job numbers skip.
 app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async (req, res) => {
   const base = process.env.BID_API_URL;
   const key = process.env.TRACKER_KEY;
@@ -622,19 +704,15 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
   }
   const jobs = (feed && feed.jobs) || [];
   const client = await pool.connect();
-  const imported = [], skipped = [];
+  const imported = [], skipped = [], newJobs = [];
   try {
     await client.query('BEGIN');
     for (const j of jobs) {
       const jobNo = String(j.job_number || '').trim();
       if (!jobNo) continue;
-      const exists = await client.query('SELECT 1 FROM projects WHERE job_number = $1 LIMIT 1', [jobNo]);
-      if (exists.rowCount) { skipped.push(jobNo); continue; }
-      const ins = await client.query(
-        'INSERT INTO projects (job_number, name, customer, original_contract, cost, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10) RETURNING id',
-        [jobNo, j.project_name || ('Job ' + jobNo), d(j.client_gc), money(j.contract_amount), money(j.cost), 'Awarded', d(String(j.won_at || '').slice(0, 10)), j.estimate_id || null, d(j.bid_number), req.user.id]);
-      await client.query('INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)', [ins.rows[0].id, 'Awarded', req.user.id]);
-      imported.push(jobNo);
+      const newId = await createProjectFromWonJob(client, j, req.user.id);
+      if (newId) { imported.push(jobNo); newJobs.push({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount }); }
+      else { skipped.push(jobNo); }
     }
     await client.query('COMMIT');
   } catch (err) {
@@ -644,7 +722,51 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
   } finally {
     client.release();
   }
+  for (const nj of newJobs) notifyNewProject(nj).catch(e => console.error('[notify] failed:', e.message));
   res.json({ ok: true, importedCount: imported.length, skippedCount: skipped.length, imported, skipped });
+});
+
+// ====== NOTIFICATION RECIPIENTS (admin only) ======
+// The people emailed when a new job lands in the tracker. Managed in-app so
+// admins can change the list without a code change.
+app.get('/api/notification-recipients', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, email, name, active, created_at FROM tracker_notification_recipients ORDER BY created_at ASC');
+    res.json(rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.post('/api/notification-recipients', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const name = String((req.body || {}).name || '').trim();
+  const active = (req.body || {}).active === false ? false : true;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'A valid email is required.' });
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO tracker_notification_recipients (email, name, active) VALUES ($1,$2,$3) ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, active = EXCLUDED.active RETURNING id, email, name, active, created_at',
+      [email, name, active]);
+    res.status(201).json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.put('/api/notification-recipients/:id', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  const b = req.body || {};
+  const sets = [], vals = [];
+  if (b.email != null) { const e = String(b.email).trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return res.status(400).json({ error: 'Invalid email.' }); sets.push('email = $' + (vals.push(e))); }
+  if (b.name != null) { sets.push('name = $' + (vals.push(String(b.name).trim()))); }
+  if (b.active != null) { sets.push('active = $' + (vals.push(!!b.active))); }
+  if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
+  vals.push(req.params.id);
+  try {
+    const { rows } = await pool.query('UPDATE tracker_notification_recipients SET ' + sets.join(', ') + ' WHERE id = $' + vals.length + ' RETURNING id, email, name, active, created_at', vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
+app.delete('/api/notification-recipients/:id', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  try {
+    const r = await pool.query('DELETE FROM tracker_notification_recipients WHERE id = $1', [req.params.id]);
+    if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
 });
 
 // ====== ADMIN "IMPORT WON JOBS" PAGE (Step 4) ======
@@ -672,6 +794,48 @@ app.get('/admin/import', (req, res) => {
     'if(!r.ok){out.textContent=(r.status===401?"Please log in as an admin first, then reload this page.":(r.status===403?"You need an admin account to import.":("Error: "+(j.error||r.status))));b.disabled=false;return;}' +
     'out.textContent="Imported "+j.importedCount+" job(s)"+(j.imported.length?": "+j.imported.join(", "):"")+".\\nSkipped "+j.skippedCount+" already in the tracker"+(j.skipped.length?": "+j.skipped.join(", "):"")+".";' +
     'b.disabled=false;}catch(e){out.textContent="Could not reach the server: "+e.message;b.disabled=false;}};' +
+    '</script></div></body></html>'
+  );
+});
+
+// ====== ADMIN "NOTIFICATION RECIPIENTS" PAGE ======
+// Simple in-app screen for admins to manage who gets the new-job email.
+// Visit /admin/notifications while logged in as an admin.
+app.get('/admin/notifications', (req, res) => {
+  res.type('html').send(
+    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>New-job email recipients - R&R Project Tracker</title>' +
+    '<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f4f6f9;color:#1c2430;margin:0;padding:40px;display:flex;justify-content:center}' +
+    '.card{background:#fff;border:1px solid #e2e7ee;border-radius:14px;padding:28px;max-width:620px;width:100%}' +
+    'h1{font-size:20px;margin:0 0 4px}p.sub{color:#6b7889;font-size:13px;margin:0 0 20px}' +
+    'input{padding:10px;border:1px solid #cbd3de;border-radius:8px;font-size:14px}' +
+    '.row{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}.row input.email{flex:2;min-width:200px}.row input.name{flex:1;min-width:140px}' +
+    'button{background:#d98521;color:#3a2400;border:0;border-radius:9px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer}' +
+    'button.link{background:none;color:#b23b3b;font-weight:600;padding:4px 8px}button.toggle{background:#eef1f5;color:#3a4656;font-weight:600;padding:4px 10px}' +
+    'table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}td,th{text-align:left;padding:8px 6px;border-bottom:1px solid #eef1f5}' +
+    'th{color:#6b7889;font-weight:600;font-size:12px}.muted{color:#93a0b0}.err{color:#b23b3b;font-size:13px;margin-top:10px}a{color:#2f6fb0}</style></head><body><div class="card">' +
+    '<h1>New-job email recipients</h1>' +
+    '<p class="sub">These people are emailed automatically whenever a new job is created in the tracker from a won bid. Inactive recipients stay on the list but are skipped.</p>' +
+    '<div class="row"><input class="email" id="email" type="email" placeholder="email@rrfab.com"><input class="name" id="name" type="text" placeholder="Name (optional)"><button id="add">Add</button></div>' +
+    '<div id="err" class="err"></div>' +
+    '<table><thead><tr><th>Email</th><th>Name</th><th>Status</th><th></th></tr></thead><tbody id="list"><tr><td colspan="4" class="muted">Loading...</td></tr></tbody></table>' +
+    '<p style="margin-top:22px"><a href="/">Back to the tracker</a></p>' +
+    '<script>' +
+    'var listEl=document.getElementById("list"),errEl=document.getElementById("err");' +
+    'function esc(t){var d=document.createElement("div");d.textContent=(t==null?"":String(t));return d.innerHTML;}' +
+    'function api(method,path,body){return fetch(path,{method:method,headers:{"Content-Type":"application/json"},credentials:"same-origin",body:body?JSON.stringify(body):undefined});}' +
+    'function show(msg){errEl.textContent=msg||"";}' +
+    'function load(){api("GET","/api/notification-recipients").then(function(r){if(r.status===401){listEl.innerHTML=\'<tr><td colspan=4>Please log in as an admin, then reload.</td></tr>\';return null;}if(r.status===403){listEl.innerHTML=\'<tr><td colspan=4>You need an admin account.</td></tr>\';return null;}return r.json();}).then(function(rows){if(!rows)return;render(rows);}).catch(function(e){show("Could not load: "+e.message);});}' +
+    'function render(rows){if(!rows.length){listEl.innerHTML=\'<tr><td colspan=4 class=muted>No recipients yet. Add one above.</td></tr>\';return;}listEl.innerHTML=rows.map(function(x){' +
+    'var status=x.active?"Active":"<span class=muted>Inactive</span>";' +
+    'return "<tr data-id="+x.id+"><td>"+esc(x.email)+"</td><td>"+esc(x.name)+"</td><td>"+status+"</td>"+' +
+    '"<td style=text-align:right><button class=toggle data-act="+(x.active?"off":"on")+">"+(x.active?"Deactivate":"Activate")+"</button> <button class=link data-del=1>Remove</button></td></tr>";}).join("");}' +
+    'document.getElementById("add").onclick=function(){show("");var email=document.getElementById("email").value.trim();var name=document.getElementById("name").value.trim();if(!email){show("Enter an email.");return;}' +
+    'api("POST","/api/notification-recipients",{email:email,name:name}).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}).then(function(o){if(!o.ok){show(o.j.error||"Could not add.");return;}document.getElementById("email").value="";document.getElementById("name").value="";load();}).catch(function(e){show(e.message);});};' +
+    'listEl.onclick=function(ev){var tr=ev.target.closest("tr[data-id]");if(!tr)return;var id=tr.getAttribute("data-id");' +
+    'if(ev.target.hasAttribute("data-del")){if(!confirm("Remove this recipient?"))return;api("DELETE","/api/notification-recipients/"+id).then(function(){load();});}' +
+    'else if(ev.target.classList.contains("toggle")){var act=ev.target.getAttribute("data-act")==="on";api("PUT","/api/notification-recipients/"+id,{active:act}).then(function(){load();});}};' +
+    'load();' +
     '</script></div></body></html>'
   );
 });
