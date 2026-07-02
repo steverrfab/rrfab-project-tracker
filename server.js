@@ -631,8 +631,8 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
       const exists = await client.query('SELECT 1 FROM projects WHERE job_number = $1 LIMIT 1', [jobNo]);
       if (exists.rowCount) { skipped.push(jobNo); continue; }
       const ins = await client.query(
-        'INSERT INTO projects (job_number, name, customer, original_contract, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9) RETURNING id',
-        [jobNo, j.project_name || ('Job ' + jobNo), d(j.client_gc), money(j.contract_amount), 'Awarded', d(String(j.won_at || '').slice(0, 10)), j.estimate_id || null, d(j.bid_number), req.user.id]);
+        'INSERT INTO projects (job_number, name, customer, original_contract, cost, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10) RETURNING id',
+        [jobNo, j.project_name || ('Job ' + jobNo), d(j.client_gc), money(j.contract_amount), money(j.cost), 'Awarded', d(String(j.won_at || '').slice(0, 10)), j.estimate_id || null, d(j.bid_number), req.user.id]);
       await client.query('INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)', [ins.rows[0].id, 'Awarded', req.user.id]);
       imported.push(jobNo);
     }
