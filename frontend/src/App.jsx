@@ -474,12 +474,27 @@ function Billing() {
 
 function Settings() {
   const [users, setUsers] = useState([]); const [modal, setModal] = useState(false); const [edit, setEdit] = useState(null);
+  const [recips, setRecips] = useState([]); const [rEmail, setREmail] = useState(''); const [rName, setRName] = useState(''); const [rErr, setRErr] = useState('');
   const load = useCallback(() => api.get('/api/users').then(setUsers), []);
-  useEffect(() => { load(); }, [load]);
+  const loadR = useCallback(() => api.get('/api/notification-recipients').then(setRecips).catch(() => {}), []);
+  useEffect(() => { load(); loadR(); }, [load, loadR]);
+  const addR = async () => { const email = rEmail.trim(); if (!email) { setRErr('Enter an email address.'); return; } setRErr(''); try { await api.send('POST', '/api/notification-recipients', { email, name: rName.trim() }); setREmail(''); setRName(''); loadR(); } catch (e) { setRErr(e.message); } };
+  const toggleR = async (r) => { try { await api.send('PUT', '/api/notification-recipients/' + r.id, { active: !r.active }); loadR(); } catch (e) { alert(e.message); } };
+  const delR = async (r) => { if (!confirm('Remove ' + r.email + ' from the notification list?')) return; try { await api.send('DELETE', '/api/notification-recipients/' + r.id); loadR(); } catch (e) { alert(e.message); } };
   return <div className="wrap"><h1 style={{ fontSize: 22, margin: '12px 0' }}>Settings</h1>
     <div className="card"><h3>Users &amp; roles <button className="btn-pri btn-sm" onClick={() => setModal(true)}>+ Add user</button></h3>
       <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th /></tr></thead><tbody>{users.map(u => <tr key={u.id}><td><b>{u.name}</b></td><td className="muted">{u.email}</td><td>{ROLE_LABEL[u.role]}</td><td>{u.active ? <span className="g">Active</span> : <span className="muted">Disabled</span>}</td><td className="right"><button className="btn-ghost btn-sm" onClick={() => setEdit(u)}>Edit</button></td></tr>)}</tbody></table>
       <div className="note" style={{ marginTop: 10 }}>Use Edit to reset anyone's password, change their role, or disable them. New users sign in with the temporary password you set, and can change it later via Forgot password.</div>
+    </div>
+    <div className="card"><h3>New-job email notifications</h3>
+      <div className="note" style={{ margin: '-4px 0 12px', lineHeight: 1.6 }}>These people get an email automatically whenever a new job lands in the tracker from a won bid. Add any email address. <b>Deactivate</b> pauses someone without removing them; <b>Remove</b> takes them off the list.</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        <input style={{ flex: 2, minWidth: 200 }} type="email" placeholder="email@rrfab.com" value={rEmail} onChange={e => setREmail(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addR(); }} />
+        <input style={{ flex: 1, minWidth: 140 }} type="text" placeholder="Name (optional)" value={rName} onChange={e => setRName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addR(); }} />
+        <button className="btn-pri" onClick={addR}>Add</button>
+      </div>
+      {rErr && <div className="err">{rErr}</div>}
+      {recips.length ? <table><thead><tr><th>Email</th><th>Name</th><th>Status</th><th /></tr></thead><tbody>{recips.map(r => <tr key={r.id}><td><b>{r.email}</b></td><td className="muted">{r.name || '\u2014'}</td><td>{r.active ? <span className="g">Active</span> : <span className="muted">Inactive</span>}</td><td className="right"><button className="btn-ghost btn-sm" onClick={() => toggleR(r)}>{r.active ? 'Deactivate' : 'Activate'}</button> <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delR(r)}>Remove</button></td></tr>)}</tbody></table> : <div className="empty">No recipients yet. Add one above.</div>}
     </div>
     {modal && <AddUserModal onClose={() => setModal(false)} onSaved={() => { setModal(false); load(); }} />}
     {edit && <EditUserModal user={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
