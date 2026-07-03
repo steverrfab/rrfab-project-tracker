@@ -472,6 +472,34 @@ function Billing() {
   </div>;
 }
 
+const WHATS_NEW = [
+  { v: 'v1.3', date: 'July 2, 2026', title: 'New jobs arrive automatically from the bid tool',
+    body: 'When an estimator marks a bid Won and enters its job number, the project now shows up here on its own at the Awarded stage. No more importing by hand. The same job never creates a duplicate, so a re-save is always safe.' },
+  { v: 'v1.3', date: 'July 2, 2026', title: 'Email alerts when a new job lands',
+    body: 'The tracker now emails a list of people the moment a new job is created from a won bid, including the job number, project, customer, and contract. Manage who gets notified under Settings, in the New-job email notifications section. Deactivate someone to pause them without removing them.' },
+  { v: 'v1.2', date: 'June 29, 2026', title: 'Pull from bid tool button',
+    body: 'Admins can pull won bids from the bid tool at any time from the Projects page, in case you want to bring one in manually. Jobs already in the tracker are skipped.' },
+  { v: 'v1.1', date: 'June 28, 2026', title: 'Archive and restore jobs',
+    body: 'Admins can archive a job to take it off the projects list and billing while keeping it safely, and restore it any time from the Archived page.' },
+  { v: 'v1.0', date: 'June 2026', title: 'R&R Project Tracker',
+    body: 'Every awarded job in one place: live stage, schedule and sequences, change orders, AIA pay applications and retainage, documents, and notes, with sign-in and roles for your team.' },
+];
+
+function WhatsNew() {
+  return <div className="wrap">
+    <h1 style={{ fontSize: 22, margin: '12px 0 2px' }}>What's New</h1>
+    <div className="note" style={{ margin: '0 0 18px' }}>Latest updates and improvements to the R&R Project Tracker.</div>
+    <div className="card">
+      <h3>Latest Updates</h3>
+      {WHATS_NEW.map((u, i) => <div key={i} style={{ borderLeft: '3px solid var(--ac)', padding: '2px 0 2px 14px', margin: '18px 0' }}>
+        <div style={{ fontWeight: 700, fontSize: 15 }}>{u.title}</div>
+        <div style={{ margin: '3px 0 6px' }}><span style={{ color: 'var(--ac)', fontWeight: 700, fontSize: 13 }}>{u.v}</span><span className="muted" style={{ fontSize: 13 }}>{' \u00b7 ' + u.date}</span></div>
+        <div style={{ color: 'var(--tx)', fontSize: 14, lineHeight: 1.6 }}>{u.body}</div>
+      </div>)}
+    </div>
+  </div>;
+}
+
 function Settings() {
   const [users, setUsers] = useState([]); const [modal, setModal] = useState(false); const [edit, setEdit] = useState(null);
   const [recips, setRecips] = useState([]); const [rEmail, setREmail] = useState(''); const [rName, setRName] = useState(''); const [rErr, setRErr] = useState('');
@@ -657,6 +685,7 @@ function Main({ user, onLogout }) {
         <button className={'navbtn' + (view.name === 'projects' || view.name === 'detail' ? ' on' : '')} onClick={() => nav('projects')}>Projects</button>
         <button className={'navbtn' + (view.name === 'billing' ? ' on' : '')} onClick={() => nav('billing')}>Billing</button>
         <button className={'navbtn' + (view.name === 'guide' ? ' on' : '')} onClick={() => nav('guide')}>Guide</button>
+        <button className={'navbtn' + (view.name === 'whatsnew' ? ' on' : '')} onClick={() => nav('whatsnew')}>What's New</button>
         {can.archive(user.role) && <button className={'navbtn' + (view.name === 'archived' ? ' on' : '')} onClick={() => nav('archived')}>Archived</button>}
         {can.seeSettings(user.role) && <button className={'navbtn' + (view.name === 'settings' ? ' on' : '')} onClick={() => nav('settings')}>Settings</button>}
       </nav>
@@ -668,6 +697,7 @@ function Main({ user, onLogout }) {
     {view.name === 'detail' && <Detail id={view.id} user={user} onBack={() => nav('projects')} />}
     {view.name === 'billing' && <Billing />}
     {view.name === 'guide' && <Guide user={user} />}
+    {view.name === 'whatsnew' && <WhatsNew />}
     {view.name === 'archived' && can.archive(user.role) && <ArchivedJobs />}
     {view.name === 'settings' && can.seeSettings(user.role) && <Settings />}
   </>;
