@@ -9,15 +9,18 @@ const STATUSES = Object.keys(STATUS_COLORS);
 const ACTIVE_STAGES = ['Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping', 'Field/Erection'];
 const DRAWING = ['N/A', 'Not Started', 'In Progress', 'Approved', 'Revision Needed'];
 const CO_STATUS = ['Pending', 'Approved', 'Paid'];
-const PAYAPP_STATUS = ['Draft', 'Submitted', 'Approved', 'Paid'];
+const PAYAPP_STATUS = ['Draft', 'Submitted', 'Approved', 'Partially Paid', 'Paid'];
 const PMS = ['Joe Jenkins', 'Steve Moskowitz', 'Tanja', 'Unassigned'];
 const SEQ_STATUS = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped', 'Erected'];
 const SEQ_COLORS = { 'Not started': '#9aa0ab', 'In Fabrication': '#f97316', 'In Galvanizing': '#0d9488', 'In Paint': '#7c3aed', 'Shipped': '#06b6d4', 'Erected': '#16a34a' };
 const ROLE_LABEL = { super_admin: 'Super Admin', admin: 'Admin', accounting: 'Accounting', pm: 'PM', shop: 'Shop' };
 const DATE_FIELDS = ['Award', 'Projected start', 'Delivery', 'Completed'];
 
+const FINANCIAL_ROLES = ['super_admin', 'admin', 'accounting', 'pm'];
+
 const can = {
   editProject: r => ['super_admin', 'admin', 'pm'].includes(r),
+  seeMoney: r => FINANCIAL_ROLES.includes(r),
   editCO: r => ['super_admin', 'admin', 'accounting', 'pm'].includes(r),
   editPayApp: r => ['super_admin', 'admin', 'accounting'].includes(r),
   upload: () => true,
@@ -35,8 +38,22 @@ const gmColor = gm => gm >= 20 ? 'g' : gm >= 15 ? 'a' : 'r';
 
 const api = {
   get: u => fetch(u).then(r => r.json()),
-  send: (m, u, b) => fetch(u, { method: m, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Request failed'); return r.json().catch(() => ({})); }),
+  send: (m, u, b) => fetch(u, { method: m, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(async r => { if (!r.ok) { const e = new Error((await r.json().catch(() => ({}))).error || 'Request failed'); e.status = r.status; throw e; } return r.json().catch(() => ({})); }),
 };
+
+// CSV export: quote what needs quoting, then hand the file to the browser.
+function toCsv(rows) {
+  const esc = v => { const t = (v === null || v === undefined) ? '' : String(v); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+  return rows.map(r => r.map(esc).join(',')).join('\n');
+}
+function downloadCsv(name, rows) {
+  const blob = new Blob([toCsv(rows)], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+}
 
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -129,15 +146,17 @@ tfoot td{border-top:1px solid var(--bd);border-bottom:none;font-weight:700;backg
 function statusPill(s) { const c = STATUS_COLORS[s] || '#888'; return <span className="pill" style={{ background: c + '1e', color: c }}>{s}</span>; }
 const tg = (map, s) => { const c = map[s] || '#888'; return <span className="tag" style={{ background: c + '1e', color: c }}>{s}</span>; };
 const coTag = s => tg({ Pending: '#f59e0b', Approved: '#16a34a', Paid: '#22c55e' }, s);
-const payTag = s => tg({ Draft: '#6b7280', Submitted: '#7c3aed', Approved: '#16a34a', Paid: '#22c55e' }, s);
+const payTag = s => tg({ Draft: '#6b7280', Submitted: '#7c3aed', Approved: '#16a34a', 'Partially Paid': '#0ea5e9', Paid: '#22c55e' }, s);
 
 function Splash() { return <div className="center"><div className="who">Loading…</div></div>; }
 
-function AuthScreen({ mode, onDone }) {
+function AuthScreen({ mode, sso, onDone }) {
   const setup = mode === 'setup';
+  const ssoOnly = !setup && !!(sso && sso.ssoOnly);
   const [f, setF] = useState({ name: '', email: '', password: '' });
   const [err, setErr] = useState(null); const [busy, setBusy] = useState(false);
   const [forgot, setForgot] = useState(false); const [sent, setSent] = useState(false);
+  const [adminLogin, setAdminLogin] = useState(false);
   const submit = async () => { setBusy(true); setErr(null); try { await api.send('POST', setup ? '/api/auth/setup' : '/api/auth/login', f); onDone(); } catch (e) { setErr(e.message); setBusy(false); } };
   const sendReset = async () => { setBusy(true); setErr(null); try { await api.send('POST', '/api/auth/forgot-password', { email: f.email }); setSent(true); setBusy(false); } catch (e) { setErr(e.message); setBusy(false); } };
   if (!setup && forgot) return <div className="center"><div className="authbox">
@@ -153,6 +172,13 @@ function AuthScreen({ mode, onDone }) {
       <div style={{ textAlign: 'center', marginTop: 12 }}><span className="back" onClick={() => { setForgot(false); setErr(null); }}>Back to sign in</span></div>
     </>}
   </div></div>;
+  if (ssoOnly && !adminLogin) return <div className="center"><div className="authbox">
+    <h1><span className="dot" />RR Project Tracker</h1>
+    <p>Sign in through R&R Bid.</p>
+    <div className="note" style={{ lineHeight: 1.6 }}>Tracker sign-in now happens through R&R Bid. Open R&R Bid and click Project Tracker; you will land here already signed in.</div>
+    {sso.bidUrl && <a className="btn-pri" style={{ display: 'block', textAlign: 'center', textDecoration: 'none', marginTop: 16 }} href={sso.bidUrl}>Open R&R Bid</a>}
+    <div style={{ textAlign: 'center', marginTop: 14 }}><span className="back" onClick={() => setAdminLogin(true)}>Administrator sign-in</span></div>
+  </div></div>;
   return <div className="center"><div className="authbox">
     <h1><span className="dot" />RR Project Tracker</h1>
     <p>{setup ? 'Create the first administrator account.' : 'Sign in to continue.'}</p>
@@ -161,7 +187,7 @@ function AuthScreen({ mode, onDone }) {
     <div className="field"><label>Password</label><input type="password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} onKeyDown={e => e.key === 'Enter' && submit()} /></div>
     {err && <div className="err">{err}</div>}
     <button className="btn-pri" style={{ width: '100%', marginTop: 6 }} disabled={busy} onClick={submit}>{busy ? 'Please wait…' : setup ? 'Create account & sign in' : 'Sign in'}</button>
-    {!setup && <div style={{ textAlign: 'center', marginTop: 12 }}><span className="back" onClick={() => { setForgot(true); setErr(null); }}>Forgot password?</span></div>}
+    {!setup && !ssoOnly && <div style={{ textAlign: 'center', marginTop: 12 }}><span className="back" onClick={() => { setForgot(true); setErr(null); }}>Forgot password?</span></div>}
   </div></div>;
 }
 
@@ -175,7 +201,7 @@ function ProjectModal({ initial, onClose, onSaved }) {
   const set = k => e => setP({ ...p, [k]: e.target.value });
   const gp = (parseFloat(p.sellPrice) || 0) - (parseFloat(p.cost) || 0);
   const gm = parseFloat(p.sellPrice) > 0 ? gp / parseFloat(p.sellPrice) * 100 : 0;
-  const save = async () => { if (!p.name) { setErr('Project name is required'); return; } setBusy(true); setErr(null); try { if (p.id) await api.send('PUT', '/api/projects/' + p.id, p); else await api.send('POST', '/api/projects', p); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
+  const save = async () => { if (!p.name) { setErr('Project name is required'); return; } setBusy(true); setErr(null); try { if (p.id) await api.send('PUT', '/api/projects/' + p.id, { ...p, expectedUpdatedAt: p.updatedAt }); else await api.send('POST', '/api/projects', p); onSaved(); } catch (e) { if (e.status === 409) { alert(e.message); onSaved(); return; } setErr(e.message); setBusy(false); } };
   return <Modal onClose={onClose}>
     <h2>{p.id ? 'Edit project' : 'New project'}</h2>
     <div className="row2"><div className="field"><label>Job #</label><input value={p.jobNumber} onChange={set('jobNumber')} /></div><div className="field"><label>Project name</label><input value={p.name} onChange={set('name')} /></div></div>
@@ -223,19 +249,31 @@ function Dashboard({ user, onOpen }) {
   const seqCards = []; filtered.forEach(p => (p.deliveries || []).forEach(x => { if (x.id) seqCards.push({ ...x, _p: p }); }));
   const list = vw === 'board' ? filtered : GROUPS[group](filtered);
   const editor = can.editProject(user.role);
+  const seeMoney = can.seeMoney(user.role);
   const overdueCount = p => (p.deliveries || []).filter(d => !d.done && d.date && daysUntil(d.date) < 0).length;
-  const quickStatus = async (p, status) => { try { await api.send('PUT', '/api/projects/' + p.id, { ...p, status }); load(); } catch (e) { alert(e.message); } };
-  const moveStage = async (pid, st) => { const pj = projects.find(x => x.id === pid); if (!pj || pj.status === st) return; try { await api.send('PUT', '/api/projects/' + pid, { ...pj, status: st }); load(); } catch (e) { alert(e.message); } };
+  const quickStatus = async (p, status) => { try { await api.send('PUT', '/api/projects/' + p.id, { ...p, status, expectedUpdatedAt: p.updatedAt }); load(); } catch (e) { alert(e.message); if (e.status === 409) load(); } };
+  const moveStage = async (pid, st) => { const pj = projects.find(x => x.id === pid); if (!pj || pj.status === st) return; try { await api.send('PUT', '/api/projects/' + pid, { ...pj, status: st, expectedUpdatedAt: pj.updatedAt }); load(); } catch (e) { alert(e.message); if (e.status === 409) load(); } };
   const moveSeq = async (sid, st) => { let sq = null; for (const p of projects) { const fnd = (p.deliveries || []).find(x => x.id === sid); if (fnd) { sq = fnd; break; } } if (!sq || (sq.status || 'Not started') === st) return; try { await api.send('PUT', '/api/sequences/' + sid, { description: sq.desc, status: st, fabDate: sq.fabDate, galvOut: sq.galvOut, galvBack: sq.galvBack, paintDate: sq.paintDate, shipDate: sq.shipDate, erectDate: sq.erectDate }); load(); } catch (e) { alert(e.message); } };
+
+  const exportCsv = () => {
+    const src = vw === 'board' ? filtered : GROUPS[group](filtered);
+    const head = ['Job #', 'Project', 'Customer'].concat(seeMoney ? ['Contract', 'Margin %'] : []).concat(['Status', 'Drawings', 'Material ordered', 'Sequences done', 'PM']);
+    const body = src.map(p => {
+      const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
+      const done = (p.deliveries || []).filter(x => x.done).length;
+      return [p.jobNumber, p.name, p.customer].concat(seeMoney ? [sp, gm.toFixed(1)] : []).concat([p.status, p.drawingStatus || 'N/A', p.materialOrdered ? 'Yes' : 'No', done + '/' + (p.deliveries || []).length, p.pm]);
+    });
+    downloadCsv('projects.csv', [head].concat(body));
+  };
 
   return <div className="wrap">
     {loading ? <div className="who" style={{ marginTop: 30 }}>Loading projects…</div> : <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}><h1 style={{ fontSize: 22, margin: 0 }}>Projects</h1><div className="spacer" />{can.archive(user.role) && <button className="btn-ghost" onClick={() => setModal({ bidPull: true })}>Pull from bid tool</button>}{editor && <button className="btn-pri" onClick={() => setModal({ project: blankProject() })}>+ New project</button>}</div>
       <div className="stats">
         <div className="stat"><div className="l">Active jobs</div><div className="v">{active.length}</div><div className="s">in production</div></div>
-        <div className="stat"><div className="l">Active value</div><div className="v num">{fmtK(activeVal)}</div><div className="s">contract sum, in production</div></div>
-        <div className="stat"><div className="l">Awarded backlog</div><div className="v num">{fmtK(backlogVal)}</div><div className="s">{backlog.length} won, not started</div></div>
-        <div className="stat"><div className="l">Avg gross margin</div><div className={'v num ' + gmColor(avgGM)}>{avgGM.toFixed(1)}%</div><div className="s">active, weighted</div></div>
+        {seeMoney && <div className="stat"><div className="l">Active value</div><div className="v num">{fmtK(activeVal)}</div><div className="s">contract sum, in production</div></div>}
+        {seeMoney ? <div className="stat"><div className="l">Awarded backlog</div><div className="v num">{fmtK(backlogVal)}</div><div className="s">{backlog.length} won, not started</div></div> : <div className="stat"><div className="l">Awarded backlog</div><div className="v">{backlog.length}</div><div className="s">won, not started</div></div>}
+        {seeMoney && <div className="stat"><div className="l">Avg gross margin</div><div className={'v num ' + gmColor(avgGM)}>{avgGM.toFixed(1)}%</div><div className="s">active, weighted</div></div>}
       </div>
       <div className="toolbar">
         {vw === 'list' && <div className="groupbar">{Object.keys(GROUPS).map(g => <button key={g} className={'gt' + (group === g ? ' on' : '')} onClick={() => setGroup(g)}>{g} <span style={{ opacity: .7 }}>{GROUPS[g](projects).length}</span></button>)}</div>}
@@ -243,25 +281,26 @@ function Dashboard({ user, onOpen }) {
         <div className="seg"><button className={vw === 'list' ? 'on' : ''} onClick={() => setVw('list')}>List</button><button className={vw === 'board' ? 'on' : ''} onClick={() => setVw('board')}>Board</button></div>{vw === 'board' && <div className="seg"><button className={bmode === 'job' ? 'on' : ''} onClick={() => setBmode('job')}>By job</button><button className={bmode === 'seq' ? 'on' : ''} onClick={() => setBmode('seq')}>By sequence</button></div>}
         <select value={pmF} onChange={e => setPmF(e.target.value)}>{pms.map(p => <option key={p} value={p}>{p === 'All' ? 'All PMs' : p}</option>)}</select>
         <input placeholder="Search…" value={q} onChange={e => setQ(e.target.value)} style={{ maxWidth: 200 }} />
+        <button className="btn-ghost" onClick={exportCsv}>Export CSV</button>
       </div>
       <div className="toolbar" style={{ marginTop: 8 }}>
         <div className="filt"><label>Date filter</label><select value={df} onChange={e => setDf(e.target.value)}>{DATE_FIELDS.map(f => <option key={f}>{f}</option>)}</select><label>from</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} /><label>to</label><input type="date" value={to} onChange={e => setTo(e.target.value)} />{(from || to) && <button className="btn-ghost btn-sm" onClick={() => { setFrom(''); setTo(''); }}>Clear</button>}</div>
       </div>
 
-      {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? (bmode === 'seq' ? 'Drag a sequence to another column to change its stage. Cards are labeled by job.' : 'Drag a card to another column to change its stage.') : 'Read-only view.'}</div>{bmode === 'job' ? <div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div><div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div></div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div> : <div className="board">{SEQ_STATUS.map(st => { const cards = seqCards.filter(x => (x.status || 'Not started') === st); const c = SEQ_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveSeq(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{cards.length}</span></h4>{cards.map(x => <div className="bcard" key={x.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', x.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(x._p.id)}><div style={{ fontSize: 11, fontWeight: 600, color: '#ff6b35', marginBottom: 3 }}>{x._p.jobNumber ? '#' + x._p.jobNumber : x._p.name}</div><div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>{x.desc || 'Sequence'}</div></div>)}{!cards.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div>}</>
-        : <div className="panel"><table><thead><tr><th>Project</th><th>Contract</th><th>Margin</th><th>Status</th><th>Drawings</th><th>Sequences</th><th>PM</th></tr></thead>
+      {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? (bmode === 'seq' ? 'Drag a sequence to another column to change its stage. Cards are labeled by job.' : 'Drag a card to another column to change its stage.') : 'Read-only view.'}</div>{bmode === 'job' ? <div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div>{seeMoney && <div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div>}</div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div> : <div className="board">{SEQ_STATUS.map(st => { const cards = seqCards.filter(x => (x.status || 'Not started') === st); const c = SEQ_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveSeq(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{cards.length}</span></h4>{cards.map(x => <div className="bcard" key={x.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', x.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(x._p.id)}><div style={{ fontSize: 11, fontWeight: 600, color: '#ff6b35', marginBottom: 3 }}>{x._p.jobNumber ? '#' + x._p.jobNumber : x._p.name}</div><div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>{x.desc || 'Sequence'}</div></div>)}{!cards.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div>}</>
+        : <div className="panel"><table><thead><tr><th>Project</th>{seeMoney && <th>Contract</th>}{seeMoney && <th>Margin</th>}<th>Status</th><th>Drawings</th><th>Sequences</th><th>PM</th></tr></thead>
           <tbody>{list.length ? list.map(p => {
             const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
             const done = (p.deliveries || []).filter(d => d.done).length; const od = overdueCount(p);
             return <tr key={p.id} className="row" onClick={() => onOpen(p.id)}>
               <td>{p.jobNumber && <div className="joblabel">#{p.jobNumber}</div>}<div style={{ fontWeight: 700 }}>{p.name}</div><div className="muted" style={{ fontSize: 12 }}>{p.customer}</div></td>
-              <td className="num">{fmtK(sp)}</td><td className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</td>
+              {seeMoney && <td className="num">{fmtK(sp)}</td>}{seeMoney && <td className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</td>}
               <td onClick={e => e.stopPropagation()}>{editor ? <select value={p.status} onChange={e => quickStatus(p, e.target.value)} style={{ fontSize: 12, padding: '4px 8px' }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}</td>
               <td><span className="chip">{p.drawingStatus || 'N/A'}</span>{p.materialOrdered && <span className="chip" style={{ marginLeft: 4, color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' }}>Mat ✓</span>}</td>
               <td className="muted">{(p.deliveries || []).length ? <>{done}/{p.deliveries.length}{od > 0 && <span className="flag"> · {od} overdue</span>}</> : '—'}</td>
               <td className="muted">{p.pm || '—'}</td>
             </tr>;
-          }) : <tr><td colSpan="7" className="empty">No projects match.</td></tr>}</tbody>
+          }) : <tr><td colSpan={seeMoney ? 7 : 5} className="empty">No projects match.</td></tr>}</tbody>
         </table></div>}
     </>}
     {modal && modal.project && <ProjectModal initial={modal.project} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
@@ -286,11 +325,11 @@ function Detail({ id, user, onBack }) {
     const all = await api.get('/api/projects'); setP(all.find(x => x.id === id) || null);
     setHist(await api.get('/api/projects/' + id + '/stage-history'));
     setCos(await api.get('/api/projects/' + id + '/change-orders'));
-    setInvs(await api.get('/api/projects/' + id + '/invoices'));
+    if (can.seeMoney(user.role)) setInvs(await api.get('/api/projects/' + id + '/invoices'));
     setDocs(await api.get('/api/projects/' + id + '/documents'));
     setNotes(await api.get('/api/projects/' + id + '/notes'));
     setSeqs(await api.get('/api/projects/' + id + '/sequences'));
-  }, [id]);
+  }, [id, user.role]);
   useEffect(() => { load(); }, [load]);
   if (!p) return <div className="wrap"><div className="who" style={{ marginTop: 30 }}>Loading…</div></div>;
 
@@ -302,11 +341,24 @@ function Detail({ id, user, onBack }) {
   const totalPaid = invs.reduce((s, a) => s + Number(a.amountPaid || 0), 0);
   const gp = contractSum - (Number(p.cost) || 0); const gm = contractSum > 0 ? gp / contractSum * 100 : 0;
   const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role); const eS = ['super_admin', 'admin', 'pm', 'shop'].includes(user.role); const eA = can.archive(user.role);
+  const seeMoney = can.seeMoney(user.role);
+  // Map each pay app (invoice) to its attached signed pay app document, if any.
+  const payAppDoc = {}; docs.forEach(f => { if (f.category === 'pay_app' && f.invoiceId) payAppDoc[f.invoiceId] = f; });
+  const coDoc = {}; docs.forEach(f => { if (f.category === 'co' && f.changeOrderId) coDoc[f.changeOrderId] = f; });
+  const releaseRetainage = async () => {
+    const nextNo = (invs.reduce((m, a) => Math.max(m, a.applicationNumber), 0)) + 1;
+    if (!confirm('Release retainage?\n\nThis creates the final pay app (#' + nextNo + ') billing out the ' + fmt$(retHeld) + ' currently held. Work completed stays the same and retainage drops to zero, so the amount due on it is exactly the retainage held.')) return;
+    try { await api.send('POST', '/api/projects/' + p.id + '/release-retainage'); load(); } catch (e) { alert(e.message); }
+  };
+  const delInv = async a => {
+    if (!confirm('Delete Pay App #' + a.applicationNumber + '?\n\nThis removes it from the billing history for good.')) return;
+    try { await api.send('DELETE', '/api/invoices/' + a.id); load(); } catch (e) { alert(e.message); }
+  };
   const archive = async () => { if (!confirm('Archive ' + p.name + '?\n\nIt will be removed from the projects list and billing, but kept safely. An admin can restore it any time from the Archived page.')) return; try { await api.send('DELETE', '/api/projects/' + p.id); onBack(); } catch (e) { alert(e.message); } };
 
   const feed = [];
   hist.forEach(h => feed.push({ when: h.changedAt, t: 'Moved to ' + h.status, w: h.changedBy }));
-  invs.forEach(a => { if (a.submittedDate) feed.push({ when: a.submittedDate, t: 'Pay App #' + a.applicationNumber + ' submitted', open: { kind: 'payapp', data: a } }); if (a.paidDate) feed.push({ when: a.paidDate, t: 'Pay App #' + a.applicationNumber + ' paid ' + fmt$(a.amountPaid), open: { kind: 'payapp', data: a } }); });
+  invs.forEach(a => { const relTag = a.isRetainageRelease ? ' (retainage release)' : ''; if (a.submittedDate) feed.push({ when: a.submittedDate, t: 'Pay App #' + a.applicationNumber + relTag + ' submitted', open: { kind: 'payapp', data: a } }); if (a.paidDate) feed.push({ when: a.paidDate, t: 'Pay App #' + a.applicationNumber + relTag + ' paid ' + fmt$(a.amountPaid), open: { kind: 'payapp', data: a } }); });
   cos.forEach(c => { if (c.submittedDate) feed.push({ when: c.submittedDate, t: c.coNumber + ' ' + c.status + ' (' + fmt$(c.amount) + ')', open: { kind: 'co', data: c } }); });
   notes.forEach(n => feed.push({ when: n.createdAt, t: 'Note added', w: n.author, note: true, body: n.body }));
   feed.sort((x, y) => new Date(y.when) - new Date(x.when));
@@ -322,7 +374,7 @@ function Detail({ id, user, onBack }) {
         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}><span className="chip">Drawings: {p.drawingStatus || 'N/A'}</span><span className="chip" style={p.materialOrdered ? { color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' } : {}}>Material {p.materialOrdered ? 'ordered ✓' : 'not ordered'}</span></div>
       </div>
       <div className="spacer" />
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{eP ? <select value={p.status} onChange={async e => { await api.send('PUT', '/api/projects/' + p.id, { ...p, status: e.target.value }); load(); }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}{eP && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'project', data: p })}>Edit</button>}{eA && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={archive}>Archive</button>}</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{eP ? <select value={p.status} onChange={async e => { try { await api.send('PUT', '/api/projects/' + p.id, { ...p, status: e.target.value, expectedUpdatedAt: p.updatedAt }); } catch (er) { alert(er.message); } load(); }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}{eP && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'project', data: p })}>Edit</button>}{eA && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={archive}>Archive</button>}</div>
     </div>
 
     <div className="datestrip">
@@ -330,13 +382,13 @@ function Detail({ id, user, onBack }) {
       {nextDel && <span className="dchip" style={daysUntil(nextDel.date) < 0 ? { borderColor: '#fecaca', background: '#fef2f2', color: '#ef4444' } : {}}>Next delivery: <b>{fmtDate(nextDel.date)}</b>{daysUntil(nextDel.date) < 0 ? ' · overdue' : ''}</span>}
     </div>
 
-    <div className="card"><h3>Billing &amp; retainage (live)</h3><div className="grid2">
+    {seeMoney && <div className="card"><h3>Billing &amp; retainage (live){retHeld > 0.005 && <button className="btn-ghost btn-sm" onClick={releaseRetainage}>Release retainage</button>}</h3><div className="grid2">
       <div className="kv"><div className="k">Contract sum</div><div className="v num">{fmt$(contractSum)}</div></div>
       <div className="kv"><div className="k">Billed to date</div><div className="v num">{fmt$(billed)}</div></div>
       <div className="kv"><div className="k">Retainage held</div><div className="v num">{fmt$(retHeld)}</div></div>
       <div className="kv"><div className="k">Net paid</div><div className="v num">{fmt$(totalPaid)}</div></div>
       <div className="kv"><div className="k">Balance to finish</div><div className="v num">{fmt$(contractSum - billed)}</div></div>
-      <div className="kv"><div className="k">Gross margin</div><div className={'v num ' + gmColor(gm)}>{gm.toFixed(1)}%</div></div></div></div>
+      <div className="kv"><div className="k">Gross margin</div><div className={'v num ' + gmColor(gm)}>{gm.toFixed(1)}%</div></div></div></div>}
 
     <div className="cols">
       <div className="card" style={{ margin: 0 }}><h3>Activity</h3>
@@ -350,14 +402,14 @@ function Detail({ id, user, onBack }) {
       <div style={{ maxHeight: 220, overflow: 'auto' }}>{seqs.length ? seqs.map(q => { const chips = [['Fab', q.fabDate], ['Galv out', q.galvOut], ['Galv back', q.galvBack], ['Paint', q.paintDate], ['Ship', q.shipDate], ['Erect', q.erectDate]].filter(c => c[1]); const sc = SEQ_COLORS[q.status] || '#9aa0ab'; return <div key={q.id} style={{ padding: '10px 0', borderBottom: '1px solid #eef0f3' }}><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><b>{q.description || 'Sequence'}</b><span className="pill" style={{ background: sc + '1e', color: sc }}>{q.status}</span><div className="spacer" />{eS && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'seq', data: q })}>Edit</button>}</div><div className="datestrip" style={{ margin: '8px 0 0' }}>{chips.length ? chips.map((c, i) => <span className="dchip" key={i}>{c[0]}: <b>{fmtDate(c[1])}</b></span>) : <span className="note">No dates set yet</span>}</div></div>; }) : <div className="empty">No sequences yet.</div>}</div>
     </div>
     <div className="card" style={{ margin: 0 }}><h3>Change orders {eC ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'co' })}>+ Add C/O</button> : <span className="note">read-only</span>}</h3>
-      <div style={{ maxHeight: 220, overflow: 'auto' }}>{cos.length ? cos.map(c => <div className="li" key={c.id} style={{ cursor: 'pointer' }} onClick={() => setModal({ t: 'item', data: { kind: 'co', data: c } })}><div className="grow"><b>{c.coNumber}</b> · {c.description}<br /><span className="muted" style={{ fontSize: 12 }}>submitted {fmtDate(c.submittedDate)}</span></div><div className="num" style={{ minWidth: 90, textAlign: 'right', fontWeight: 700 }}>{fmt$(c.amount)}</div><div style={{ minWidth: 90, textAlign: 'right' }}>{coTag(c.status)}</div></div>) : <div className="empty">No change orders yet.</div>}</div>
+      <div style={{ maxHeight: 220, overflow: 'auto' }}>{cos.length ? cos.map(c => <div className="li" key={c.id} style={{ cursor: 'pointer' }} onClick={() => setModal({ t: 'item', data: { kind: 'co', data: c } })}><div className="grow"><b>{c.coNumber}</b> · {c.description}<br /><span className="muted" style={{ fontSize: 12 }}>submitted {fmtDate(c.submittedDate)}</span></div><div className="num" style={{ minWidth: 90, textAlign: 'right', fontWeight: 700 }}>{fmt$(c.amount)}</div><div style={{ minWidth: 90, textAlign: 'right' }}>{coTag(c.status)}{coDoc[c.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none', marginLeft: 6 }} href={'/api/documents/' + coDoc[c.id].id + '/download'} onClick={e => e.stopPropagation()} title={coDoc[c.id].fileName}>📎</a>}</div></div>) : <div className="empty">No change orders yet.</div>}</div>
     </div>
     </div>
 
-    <div className="card"><h3>Pay applications {eI ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> : <span className="note">read-only</span>}</h3>
-      {invs.length ? <table><thead><tr><th>App #</th><th>Period</th><th className="right">Completed</th><th className="right">Retainage</th><th className="right">Due</th><th className="right">Paid</th><th>Status</th><th /></tr></thead>
-        <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right">{eI && a.status !== 'Paid' && !a.amountPaid && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
-    </div>
+    {seeMoney && <div className="card"><h3>Pay applications {eI ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> : <span className="note">read-only</span>}</h3>
+      {invs.length ? <table><thead><tr><th>App #</th><th>Period</th><th className="right">Completed to date</th><th className="right">Retainage</th><th className="right">This period</th><th className="right">Paid</th><th>Status</th><th /></tr></thead>
+        <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}{a.isRetainageRelease && <span className="chip" style={{ marginLeft: 6, color: '#0d9488', borderColor: '#99f6e4', background: '#f0fdfa' }}>Retainage release</span>}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right" style={{ whiteSpace: 'nowrap' }}>{payAppDoc[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + payAppDoc[a.id].id + '/download'} title={payAppDoc[a.id].fileName}>📎 View pay app</a>} {eI && a.status !== 'Paid' && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>} {eI && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payapp', data: a })}>Edit</button>} {eI && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delInv(a)}>Delete</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
+    </div>}
 
 
     <div className="card"><h3>Documents {can.upload() ? <UploadBtn projectId={id} onDone={load} /> : null}</h3>
@@ -366,7 +418,7 @@ function Detail({ id, user, onBack }) {
 
     {modal && modal.t === 'project' && <ProjectModal initial={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'co' && <CoModal projectId={id} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
-    {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
+    {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} existing={modal.data} contractSum={contractSum} docs={docs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'payment' && <PaymentModal inv={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'item' && <ItemModal item={modal.data} onClose={() => setModal(null)} />}
     {modal && modal.t === 'seq' && <SequenceModal projectId={id} seq={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
@@ -407,56 +459,114 @@ function SequenceModal({ projectId, seq, onClose, onSaved }) {
 
 function CoModal({ projectId, onClose, onSaved }) {
   const [c, setC] = useState({ coNumber: '', description: '', amount: '', status: 'Pending', submittedDate: today() });
-  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
   const set = k => e => setC({ ...c, [k]: e.target.value });
-  const save = async () => { setBusy(true); setErr(null); try { await api.send('POST', '/api/projects/' + projectId + '/change-orders', c); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await api.send('POST', '/api/projects/' + projectId + '/change-orders', c);
+      const coId = r && r.id;
+      if (file && coId) {
+        const fd = new FormData(); fd.append('file', file); fd.append('category', 'co'); fd.append('changeOrderId', coId);
+        const up = await fetch('/api/projects/' + projectId + '/documents', { method: 'POST', body: fd });
+        if (!up.ok) throw new Error('The change order was saved, but the file upload failed. You can add it from the Documents section.');
+      }
+      onSaved();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
   return <Modal onClose={onClose}><h2>Add change order</h2>
     <div className="field"><label>C/O number</label><input value={c.coNumber} onChange={set('coNumber')} placeholder="CO-01" /></div>
     <div className="field"><label>Description</label><input value={c.description} onChange={set('description')} /></div>
-    <div className="field"><label>Amount ($) — negative for a credit</label><input type="number" value={c.amount} onChange={set('amount')} /></div>
+    <div className="field"><label>Amount ($), negative for a credit</label><input type="number" value={c.amount} onChange={set('amount')} /></div>
     <div className="field"><label>Status</label><select value={c.status} onChange={set('status')}>{CO_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
+    <div className="field"><label>Attach C/O copy (PDF sent to GC)</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} /></div>
     <div className="note">Only Approved or Paid C/Os increase the contract sum.</div>
     {err && <div className="err">{err}</div>}
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save</button></div>
   </Modal>;
 }
 
-function PayAppModal({ projectId, prevRows, onClose, onSaved }) {
-  const nextNo = (prevRows.reduce((m, a) => Math.max(m, a.applicationNumber), 0)) + 1;
-  const prevELR = prevRows.length ? Number(prevRows[prevRows.length - 1].earnedLessRetainage) : 0;
-  const [a, setA] = useState({ applicationNumber: nextNo, periodEnd: '', workCompletedToDate: '', retainagePct: 10, status: 'Draft' });
-  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+function PayAppModal({ projectId, prevRows, existing, contractSum, docs, onClose, onSaved }) {
+  const editing = !!(existing && existing.id);
+  const existingDoc = editing ? (docs || []).find(dc => dc.category === 'pay_app' && dc.invoiceId === existing.id) : null;
+  const appNo = editing ? existing.applicationNumber : (prevRows.reduce((m, a) => Math.max(m, a.applicationNumber), 0)) + 1;
+  const before = prevRows.filter(x => x.applicationNumber < appNo && (!editing || x.id !== existing.id));
+  const prevApp = before[before.length - 1];
+  const prevELR = prevApp ? Number(prevApp.earnedLessRetainage) : 0;
+  const prevCompleted = prevApp ? Number(prevApp.workCompletedToDate) : 0;
+  const [a, setA] = useState(editing
+    ? { applicationNumber: existing.applicationNumber, periodEnd: existing.periodEnd || '', workCompletedToDate: existing.workCompletedToDate, retainagePct: existing.retainagePct, status: existing.status, submittedDate: existing.submittedDate || '', approvedDate: existing.approvedDate || '', notes: existing.notes || '', amountPaid: existing.amountPaid || '', paidDate: existing.paidDate || '' }
+    : { applicationNumber: appNo, periodEnd: '', workCompletedToDate: '', retainagePct: 10, status: 'Draft' });
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
   const set = k => e => setA({ ...a, [k]: e.target.value });
   const comp = parseFloat(a.workCompletedToDate) || 0, pct = parseFloat(a.retainagePct) || 0;
   const ret = comp * pct / 100, elr = comp - ret, due = elr - prevELR;
-  const save = async () => { setBusy(true); setErr(null); try { await api.send('POST', '/api/projects/' + projectId + '/invoices', a); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
-  return <Modal onClose={onClose}><h2>Add pay application #{nextNo}</h2>
+  const save = async () => {
+    // Over/under billing guard: warn, but let the user proceed on purpose.
+    if (contractSum > 0 && comp > contractSum + 0.005 && !confirm('Heads up: work completed to date (' + fmt$(comp) + ') is more than the contract plus approved change orders (' + fmt$(contractSum) + ').\n\nSave anyway?')) return;
+    if (comp < prevCompleted - 0.005 && !confirm('Heads up: work completed to date (' + fmt$(comp) + ') is less than the previous pay app (' + fmt$(prevCompleted) + '). Cumulative billing normally only goes up.\n\nSave anyway?')) return;
+    setBusy(true); setErr(null);
+    try {
+      let invId = editing ? existing.id : null;
+      if (editing) await api.send('PUT', '/api/invoices/' + existing.id, a);
+      else { const r = await api.send('POST', '/api/projects/' + projectId + '/invoices', a); invId = r && r.id; }
+      // If a pay app copy was chosen, upload it linked to this invoice. Picking a
+      // new file on edit replaces the one already attached.
+      if (file && invId) {
+        if (existingDoc) { try { await api.send('DELETE', '/api/documents/' + existingDoc.id); } catch (_) {} }
+        const fd = new FormData(); fd.append('file', file); fd.append('category', 'pay_app'); fd.append('invoiceId', invId);
+        const up = await fetch('/api/projects/' + projectId + '/documents', { method: 'POST', body: fd });
+        if (!up.ok) throw new Error('The pay app was saved, but the file upload failed. Open Edit and attach it again.');
+      }
+      onSaved();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return <Modal onClose={onClose}><h2>{editing ? 'Edit pay application #' + existing.applicationNumber : 'Add pay application #' + appNo}</h2>
+    {editing && <div className="field"><label>App #</label><input type="number" value={a.applicationNumber} onChange={set('applicationNumber')} /></div>}
     <div className="field"><label>Period through</label><input type="date" value={a.periodEnd} onChange={set('periodEnd')} /></div>
     <div className="field"><label>Work completed &amp; stored to date ($)</label><input type="number" value={a.workCompletedToDate} onChange={set('workCompletedToDate')} /></div>
     <div className="field"><label>Retainage %</label><input type="number" value={a.retainagePct} onChange={set('retainagePct')} /></div>
     <div className="field"><label>Status</label><select value={a.status} onChange={set('status')}>{PAYAPP_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
-    <div className="calc"><div><span>Completed to date</span><span className="num">{fmt$(comp)}</span></div><div><span>Less retainage ({pct || 0}%)</span><span className="num">- {fmt$(ret)}</span></div><div><span>Earned less retainage</span><span className="num">{fmt$(elr)}</span></div><div><span>Less previous billings</span><span className="num">- {fmt$(prevELR)}</span></div><div className="tot"><span>Current payment due</span><span className="num">{fmt$(due)}</span></div></div>
+    {editing && <div className="row2"><div className="field"><label>Amount paid ($)</label><input type="number" value={a.amountPaid} onChange={set('amountPaid')} /></div><div className="field"><label>Paid date</label><input type="date" value={a.paidDate} onChange={set('paidDate')} /></div></div>}
+    <div className="calc"><div><span>Completed to date</span><span className="num">{fmt$(comp)}</span></div><div><span>Less retainage ({pct || 0}%)</span><span className="num">- {fmt$(ret)}</span></div><div><span>Earned less retainage</span><span className="num">{fmt$(elr)}</span></div><div><span>Less previous billings</span><span className="num">- {fmt$(prevELR)}</span></div><div className="tot"><span>This period (current payment due)</span><span className="num">{fmt$(due)}</span></div></div>
+    <div className="field" style={{ marginTop: 12 }}><label>Attach pay app copy (PDF sent to GC)</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} />{existingDoc && <div className="note" style={{ marginTop: 6 }}>Attached: <a href={'/api/documents/' + existingDoc.id + '/download'} style={{ color: 'var(--ac)' }}>{existingDoc.fileName}</a>{file ? '. Saving will replace it.' : ''}</div>}</div>
     {err && <div className="err">{err}</div>}
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save</button></div>
   </Modal>;
 }
 
 function PaymentModal({ inv, onClose, onSaved }) {
-  const [amt, setAmt] = useState(Math.round(Number(inv.currentPaymentDue) || 0)); const [date, setDate] = useState(today());
+  const due = Number(inv.currentPaymentDue) || 0;
+  const already = Number(inv.amountPaid) || 0;
+  const remaining = Math.max(0, Math.round((due - already) * 100) / 100);
+  const [amt, setAmt] = useState(remaining); const [date, setDate] = useState(today());
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
   const save = async () => { setBusy(true); setErr(null); try { await api.send('POST', '/api/invoices/' + inv.id + '/payment', { amountPaid: amt, paidDate: date }); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
-  return <Modal onClose={onClose}><h2>Record payment — Pay App #{inv.applicationNumber}</h2>
-    <div className="field"><label>Amount received ($)</label><input type="number" value={amt} onChange={e => setAmt(e.target.value)} /></div>
+  return <Modal onClose={onClose}><h2>Record payment: Pay App #{inv.applicationNumber}</h2>
+    <div className="calc"><div><span>Payment due</span><span className="num">{fmt$(due)}</span></div><div><span>Already received</span><span className="num">{fmt$(already)}</span></div><div className="tot"><span>Remaining</span><span className="num">{fmt$(remaining)}</span></div></div>
+    <div className="field" style={{ marginTop: 12 }}><label>Amount received ($)</label><input type="number" value={amt} onChange={e => setAmt(e.target.value)} /></div>
     <div className="field"><label>Payment date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} /></div>
+    <div className="note">Payments add up. Anything short of the amount due marks the app Partially Paid; record the rest later the same way.</div>
     {err && <div className="err">{err}</div>}
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save payment</button></div>
   </Modal>;
 }
 
-function Billing() {
+function Billing({ onOpen }) {
   const [d, setD] = useState(null);
   useEffect(() => { api.get('/api/billing').then(setD); }, []);
   if (!d) return <div className="wrap"><div className="who" style={{ marginTop: 30 }}>Loading…</div></div>;
+  if (d.error) return <div className="wrap"><div className="who" style={{ marginTop: 30 }}>{d.error}</div></div>;
+  const relChip = <span className="chip" style={{ marginLeft: 6, color: '#0d9488', borderColor: '#99f6e4', background: '#f0fdfa' }}>Retainage release</span>;
+  const custGroups = {};
+  d.open.forEach(o => { const k = o.customer || 'No customer on file'; (custGroups[k] = custGroups[k] || { total: 0, rows: [] }); custGroups[k].total += Number(o.due || 0); custGroups[k].rows.push(o); });
+  const custKeys = Object.keys(custGroups).sort((x, y) => custGroups[y].total - custGroups[x].total);
+  const ret = d.retainageOutstanding || [];
+  const margin = d.margin || [];
+  const mt = d.marginTotals || { contractSum: 0, cost: 0, marginDollars: 0, marginPct: 0 };
+  const exportOpen = () => downloadCsv('receivables.csv', [['Job #', 'Project', 'Customer', 'Pay app', 'Status', 'Submitted', 'Days outstanding', 'This period', 'Amount due'], ...d.open.map(o => [o.jobNumber, o.name, o.customer, o.applicationNumber, o.status, o.submittedDate, o.days, o.thisPeriod, o.due])]);
+  const exportRet = () => downloadCsv('retainage-outstanding.csv', [['Job #', 'Project', 'Customer', 'Status', 'Last pay app', 'Days held', 'Retainage held'], ...ret.map(r => [r.jobNumber, r.name, r.customer, r.status, r.lastAppDate, r.daysHeld, r.amount])]);
+  const exportMargin = () => downloadCsv('margin.csv', [['Job #', 'Project', 'Customer', 'Status', 'Contract sum', 'Cost', 'Margin $', 'Margin %'], ...margin.map(m => [m.jobNumber, m.name, m.customer, m.status, m.contractSum, m.cost, m.marginDollars, m.marginPct.toFixed(1)]), ['', 'Totals', '', '', mt.contractSum, mt.cost, mt.marginDollars, mt.marginPct.toFixed(1)]]);
   return <div className="wrap">
     <h1 style={{ fontSize: 22, margin: '12px 0' }}>Billing &amp; receivables</h1>
     <div className="stats">
@@ -466,9 +576,15 @@ function Billing() {
       <div className="stat"><div className="l">Overdue (&gt;{d.netDays}d)</div><div className={'v num ' + (d.overdue ? 'r' : '')}>{fmtK(d.overdue)}</div></div>
       <div className="stat"><div className="l">Retainage held</div><div className="v num">{fmtK(d.retainageHeld)}</div></div>
     </div>
-    <div className="card"><h3>Awaiting payment</h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Submitted</th><th>Outstanding for</th><th className="right">Amount due</th></tr></thead><tbody>{d.open.length ? d.open.map((o, i) => <tr key={i}><td>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}<b>{o.name}</b></td><td>#{o.applicationNumber}</td><td className="muted">{fmtDate(o.submittedDate)}</td><td className={o.overdue ? 'r' : 'num'}>{o.days} days{o.overdue ? ' · OVERDUE' : ''}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(o.due)}</td></tr>) : <tr><td colSpan="5" className="empty">Nothing outstanding.</td></tr>}</tbody></table></div>
-    <div className="card"><h3>Payment history (paid)</h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Paid date</th><th className="right">Amount paid</th></tr></thead><tbody>{d.paidHist.length ? d.paidHist.map((h, i) => <tr key={i}><td>{h.jobNumber && <span className="joblabel">#{h.jobNumber} </span>}<b>{h.name}</b></td><td>#{h.applicationNumber}</td><td className="muted">{fmtDate(h.paidDate)}</td><td className="right num g" style={{ fontWeight: 700 }}>{fmt$(h.amountPaid)}</td></tr>) : <tr><td colSpan="4" className="empty">No payments recorded yet.</td></tr>}</tbody></table></div>
-    <div className="card"><h3>May need billing</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Active jobs where the contract is ahead of what has been billed.</div><table><thead><tr><th>Project</th><th>Status</th><th>Last billed</th><th className="right">Unbilled work</th></tr></thead><tbody>{d.needsBilling.length ? d.needsBilling.map((n, i) => <tr key={i}><td>{n.jobNumber && <span className="joblabel">#{n.jobNumber} </span>}<b>{n.name}</b></td><td>{statusPill(n.status)}</td><td className="muted">{n.lastBilled ? fmtDate(n.lastBilled) : 'never billed'}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(n.unbilled)}</td></tr>) : <tr><td colSpan="4" className="empty">No active jobs with unbilled work.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>Awaiting payment <button className="btn-ghost btn-sm" onClick={exportOpen}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Status</th><th>Submitted</th><th>Outstanding for</th><th className="right">This period</th><th className="right">Amount due</th></tr></thead><tbody>{d.open.length ? d.open.map((o, i) => <tr key={i} className="row" onClick={() => o.projectId && onOpen(o.projectId)}><td>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}<b>{o.name}</b></td><td>#{o.applicationNumber}{o.isRetainageRelease && relChip}</td><td>{payTag(o.status)}</td><td className="muted">{fmtDate(o.submittedDate)}</td><td className={o.overdue ? 'r' : 'num'}>{o.days} days{o.overdue ? ' · OVERDUE' : ''}</td><td className="right num">{fmt$(o.thisPeriod)}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(o.due)}</td></tr>) : <tr><td colSpan="7" className="empty">Nothing outstanding.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>Receivables by customer</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Grouped by customer. Click any project to open it.</div><table><thead><tr><th>Customer / project</th><th>Pay app</th><th className="right">Outstanding</th></tr></thead><tbody>{custKeys.length ? custKeys.map((k, ci) => [
+      <tr key={'c' + ci} style={{ background: '#f8f9fb' }}><td style={{ fontWeight: 800 }}>{k}</td><td /><td className="right num" style={{ fontWeight: 800 }}>{fmt$(custGroups[k].total)}</td></tr>,
+      ...custGroups[k].rows.map((o, ri) => <tr key={'c' + ci + 'r' + ri} className="row" onClick={() => o.projectId && onOpen(o.projectId)}><td style={{ paddingLeft: 28 }}>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}{o.name}</td><td>#{o.applicationNumber}{o.isRetainageRelease && relChip}</td><td className="right num">{fmt$(o.due)}</td></tr>),
+    ]) : <tr><td colSpan="3" className="empty">Nothing outstanding.</td></tr>}</tbody>{custKeys.length > 0 && <tfoot><tr><td>Total</td><td /><td className="right num">{fmt$(d.outstanding)}</td></tr></tfoot>}</table></div>
+    <div className="card"><h3>Retainage outstanding <button className="btn-ghost btn-sm" onClick={exportRet}>Export CSV</button></h3><div className="note" style={{ margin: '-4px 0 10px' }}>Every job still holding retainage, oldest first. Completed jobs listed here are waiting on their final release.</div><table><thead><tr><th>Project</th><th>Customer</th><th>Status</th><th>Last pay app</th><th>Held for</th><th className="right">Retainage held</th></tr></thead><tbody>{ret.length ? ret.map((r, i) => <tr key={i} className="row" onClick={() => r.projectId && onOpen(r.projectId)}><td>{r.jobNumber && <span className="joblabel">#{r.jobNumber} </span>}<b>{r.name}</b></td><td className="muted">{r.customer}</td><td>{statusPill(r.status)}</td><td className="muted">{fmtDate(r.lastAppDate)}</td><td className="num">{r.daysHeld} days</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(r.amount)}</td></tr>) : <tr><td colSpan="6" className="empty">No retainage held anywhere.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>Margin (active jobs) <button className="btn-ghost btn-sm" onClick={exportMargin}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Status</th><th className="right">Contract sum</th><th className="right">Cost</th><th className="right">Margin $</th><th className="right">Margin %</th></tr></thead><tbody>{margin.length ? margin.map((m, i) => <tr key={i} className="row" onClick={() => m.projectId && onOpen(m.projectId)}><td>{m.jobNumber && <span className="joblabel">#{m.jobNumber} </span>}<b>{m.name}</b><div className="muted" style={{ fontSize: 12 }}>{m.customer}</div></td><td>{statusPill(m.status)}</td><td className="right num">{fmt$(m.contractSum)}</td><td className="right num">{fmt$(m.cost)}</td><td className="right num">{fmt$(m.marginDollars)}</td><td className={'right num ' + gmColor(m.marginPct)}>{m.marginPct.toFixed(1)}%</td></tr>) : <tr><td colSpan="6" className="empty">No active jobs.</td></tr>}</tbody>{margin.length > 0 && <tfoot><tr><td>Totals</td><td /><td className="right num">{fmt$(mt.contractSum)}</td><td className="right num">{fmt$(mt.cost)}</td><td className="right num">{fmt$(mt.marginDollars)}</td><td className={'right num ' + gmColor(mt.marginPct)}>{mt.marginPct.toFixed(1)}%</td></tr></tfoot>}</table></div>
+    <div className="card"><h3>Payment history (paid)</h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Paid date</th><th className="right">Amount paid</th></tr></thead><tbody>{d.paidHist.length ? d.paidHist.map((h, i) => <tr key={i} className="row" onClick={() => h.projectId && onOpen(h.projectId)}><td>{h.jobNumber && <span className="joblabel">#{h.jobNumber} </span>}<b>{h.name}</b></td><td>#{h.applicationNumber}{h.isRetainageRelease && relChip}</td><td className="muted">{fmtDate(h.paidDate)}</td><td className="right num g" style={{ fontWeight: 700 }}>{fmt$(h.amountPaid)}</td></tr>) : <tr><td colSpan="4" className="empty">No payments recorded yet.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>May need billing</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Active jobs where the contract is ahead of what has been billed.</div><table><thead><tr><th>Project</th><th>Status</th><th>Last billed</th><th className="right">Unbilled work</th></tr></thead><tbody>{d.needsBilling.length ? d.needsBilling.map((n, i) => <tr key={i} className="row" onClick={() => n.projectId && onOpen(n.projectId)}><td>{n.jobNumber && <span className="joblabel">#{n.jobNumber} </span>}<b>{n.name}</b></td><td>{statusPill(n.status)}</td><td className="muted">{n.lastBilled ? fmtDate(n.lastBilled) : 'never billed'}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(n.unbilled)}</td></tr>) : <tr><td colSpan="4" className="empty">No active jobs with unbilled work.</td></tr>}</tbody></table></div>
   </div>;
 }
 
@@ -675,15 +791,14 @@ function ResetPassword({ token }) {
   </div></div>;
 }
 
-function Main({ user, onLogout }) {
-  const [view, setView] = useState({ name: 'projects' });
+function Main({ user, onLogout }) {  const [view, setView] = useState({ name: 'projects' });
   const nav = name => setView({ name });
   return <>
     <div className="top"><div className="topin">
       <div className="logo"><span className="dot" />RR Project Tracker</div>
       <nav className="nav">
         <button className={'navbtn' + (view.name === 'projects' || view.name === 'detail' ? ' on' : '')} onClick={() => nav('projects')}>Projects</button>
-        <button className={'navbtn' + (view.name === 'billing' ? ' on' : '')} onClick={() => nav('billing')}>Billing</button>
+        {can.seeMoney(user.role) && <button className={'navbtn' + (view.name === 'billing' ? ' on' : '')} onClick={() => nav('billing')}>Billing</button>}
         <button className={'navbtn' + (view.name === 'guide' ? ' on' : '')} onClick={() => nav('guide')}>Guide</button>
         <button className={'navbtn' + (view.name === 'whatsnew' ? ' on' : '')} onClick={() => nav('whatsnew')}>What's New</button>
         {can.archive(user.role) && <button className={'navbtn' + (view.name === 'archived' ? ' on' : '')} onClick={() => nav('archived')}>Archived</button>}
@@ -695,7 +810,7 @@ function Main({ user, onLogout }) {
     </div></div>
     {view.name === 'projects' && <Dashboard user={user} onOpen={id => setView({ name: 'detail', id })} />}
     {view.name === 'detail' && <Detail id={view.id} user={user} onBack={() => nav('projects')} />}
-    {view.name === 'billing' && <Billing />}
+    {view.name === 'billing' && can.seeMoney(user.role) && <Billing onOpen={id => setView({ name: 'detail', id })} />}
     {view.name === 'guide' && <Guide user={user} />}
     {view.name === 'whatsnew' && <WhatsNew />}
     {view.name === 'archived' && can.archive(user.role) && <ArchivedJobs />}
@@ -705,13 +820,15 @@ function Main({ user, onLogout }) {
 
 export default function App() {
   const [auth, setAuth] = useState(null);
+  const [sso, setSso] = useState(null);
   useEffect(() => { document.title = 'RR Project Tracker'; }, []);
   const reload = useCallback(() => api.get('/api/auth/status').then(setAuth), []);
   useEffect(() => { reload(); }, [reload]);
+  useEffect(() => { api.get('/api/auth/mode').then(setSso).catch(() => setSso({ ssoOnly: false, bidUrl: '' })); }, []);
   const logout = async () => { await api.send('POST', '/api/auth/logout'); reload(); };
   const resetToken = (typeof window !== 'undefined' && window.location.pathname.replace(/\/+$/, '') === '/reset') ? new URLSearchParams(window.location.search).get('token') : null;
   return <>
     <style>{CSS}</style>
-    {resetToken ? <ResetPassword token={resetToken} /> : !auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" onDone={reload} /> : <Main user={auth.user} onLogout={logout} />}
+    {resetToken ? <ResetPassword token={resetToken} /> : !auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" sso={sso} onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" sso={sso} onDone={reload} /> : <Main user={auth.user} onLogout={logout} />}
   </>;
 }
