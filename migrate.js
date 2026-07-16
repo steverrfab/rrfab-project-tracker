@@ -118,6 +118,12 @@ async function runExtraMigrations() {
       name text NOT NULL DEFAULT '',
       active boolean NOT NULL DEFAULT true,
       created_at timestamptz NOT NULL DEFAULT now())`);
+    // Retainage release apps + partial payments: new flag plus a relaxed
+    // status check so 'Partially Paid' works on databases created earlier.
+    await client.query('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS is_retainage_release boolean NOT NULL DEFAULT false');
+    await client.query('ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_status_check');
+    // Conflict guard: track when a project row last changed.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()');
     console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);

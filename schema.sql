@@ -74,7 +74,8 @@ CREATE TABLE projects (
     crm_customer_id     uuid,              -- reserved: future CRM customer link (blank for now)
     bid_id              uuid,              -- reserved: future bid-tool link (blank for now)
     created_by          uuid        REFERENCES users(id),
-    created_at          timestamptz NOT NULL DEFAULT now()
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------------
@@ -145,8 +146,10 @@ CREATE TABLE invoices (
                                                                -- retainage; if null the app
                                                                -- computes completed * pct
     amount_paid            numeric(14,2),                      -- what actually landed
+    is_retainage_release   boolean     NOT NULL DEFAULT false,  -- final app that bills
+                                                               -- out the held retainage
     status                 text        NOT NULL DEFAULT 'Draft'
-                           CHECK (status IN ('Draft','Submitted','Approved','Paid')),
+                           CHECK (status IN ('Draft','Submitted','Approved','Partially Paid','Paid')),
     submitted_date         date,
     approved_date          date,
     paid_date              date,
