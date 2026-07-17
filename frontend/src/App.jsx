@@ -257,11 +257,11 @@ function Dashboard({ user, onOpen }) {
 
   const exportCsv = () => {
     const src = vw === 'board' ? filtered : GROUPS[group](filtered);
-    const head = ['Job #', 'Project', 'Customer'].concat(seeMoney ? ['Contract', 'Margin %'] : []).concat(['Status', 'Drawings', 'Material ordered', 'Sequences done', 'PM']);
+    const head = ['Job #', 'Project', 'Customer'].concat(seeMoney ? ['Contract', 'Margin %'] : []).concat(['Status', 'Drawings', 'Material ordered', 'Sequences done', 'PM', 'Awarded']);
     const body = src.map(p => {
       const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
       const done = (p.deliveries || []).filter(x => x.done).length;
-      return [p.jobNumber, p.name, p.customer].concat(seeMoney ? [sp, gm.toFixed(1)] : []).concat([p.status, p.drawingStatus || 'N/A', p.materialOrdered ? 'Yes' : 'No', done + '/' + (p.deliveries || []).length, p.pm]);
+      return [p.jobNumber, p.name, p.customer].concat(seeMoney ? [sp, gm.toFixed(1)] : []).concat([p.status, p.drawingStatus || 'N/A', p.materialOrdered ? 'Yes' : 'No', done + '/' + (p.deliveries || []).length, p.pm, p.awardDate ? fmtDate(p.awardDate) : '']);
     });
     downloadCsv('projects.csv', [head].concat(body));
   };
@@ -288,7 +288,7 @@ function Dashboard({ user, onOpen }) {
       </div>
 
       {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? (bmode === 'seq' ? 'Drag a sequence to another column to change its stage. Cards are labeled by job.' : 'Drag a card to another column to change its stage.') : 'Read-only view.'}</div>{bmode === 'job' ? <div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div>{seeMoney && <div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div>}</div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div> : <div className="board">{SEQ_STATUS.map(st => { const cards = seqCards.filter(x => (x.status || 'Not started') === st); const c = SEQ_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveSeq(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{cards.length}</span></h4>{cards.map(x => <div className="bcard" key={x.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', x.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(x._p.id)}><div style={{ fontSize: 11, fontWeight: 600, color: '#ff6b35', marginBottom: 3 }}>{x._p.jobNumber ? '#' + x._p.jobNumber : x._p.name}</div><div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>{x.desc || 'Sequence'}</div></div>)}{!cards.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div>}</>
-        : <div className="panel"><table><thead><tr><th>Project</th>{seeMoney && <th>Contract</th>}{seeMoney && <th>Margin</th>}<th>Status</th><th>Drawings</th><th>Sequences</th><th>PM</th></tr></thead>
+        : <div className="panel"><table><thead><tr><th>Project</th>{seeMoney && <th>Contract</th>}{seeMoney && <th>Margin</th>}<th>Status</th><th>Drawings</th><th>Sequences</th><th>PM</th><th>Awarded</th></tr></thead>
           <tbody>{list.length ? list.map(p => {
             const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
             const done = (p.deliveries || []).filter(d => d.done).length; const od = overdueCount(p);
@@ -299,8 +299,9 @@ function Dashboard({ user, onOpen }) {
               <td><span className="chip">{p.drawingStatus || 'N/A'}</span>{p.materialOrdered && <span className="chip" style={{ marginLeft: 4, color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' }}>Mat ✓</span>}</td>
               <td className="muted">{(p.deliveries || []).length ? <>{done}/{p.deliveries.length}{od > 0 && <span className="flag"> · {od} overdue</span>}</> : '—'}</td>
               <td className="muted">{p.pm || '—'}</td>
+              <td className="muted">{p.awardDate ? fmtDate(p.awardDate) : '—'}</td>
             </tr>;
-          }) : <tr><td colSpan={seeMoney ? 7 : 5} className="empty">No projects match.</td></tr>}</tbody>
+          }) : <tr><td colSpan={seeMoney ? 8 : 6} className="empty">No projects match.</td></tr>}</tbody>
         </table></div>}
     </>}
     {modal && modal.project && <ProjectModal initial={modal.project} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
@@ -370,7 +371,7 @@ function Detail({ id, user, onBack }) {
     <span className="back" onClick={onBack}>← Back to projects</span>
     <div className="dhead">
       <div>{p.jobNumber && <div className="joblabel">#{p.jobNumber}</div>}<h1>{p.name}</h1>
-        <div className="muted" style={{ marginTop: 4 }}>{p.customer} · PM {p.pm || '—'}</div>
+        <div className="muted" style={{ marginTop: 4 }}>{p.customer} · PM {p.pm || '—'}{p.awardDate ? ' · Awarded ' + fmtDate(p.awardDate) : ''}</div>
         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}><span className="chip">Drawings: {p.drawingStatus || 'N/A'}</span><span className="chip" style={p.materialOrdered ? { color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' } : {}}>Material {p.materialOrdered ? 'ordered ✓' : 'not ordered'}</span></div>
       </div>
       <div className="spacer" />
