@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 const STATUS_COLORS = {
   'Awarded': '#22c55e', 'Detailing': '#6366f1', 'Purchasing': '#f59e0b', 'In Fabrication': '#f97316',
@@ -590,6 +590,12 @@ function Billing({ onOpen }) {
 }
 
 const WHATS_NEW = [
+  { v: 'v1.6', date: 'July 16, 2026', title: 'Update notifications',
+    body: 'When a new version of the tracker is released, a banner now appears at the top of the screen. Click Update now to refresh to the latest version. You no longer have to wonder whether you are on the current version.' },
+  { v: 'v1.5', date: 'July 16, 2026', title: 'Award date on the dashboard',
+    body: 'Every job now shows the date it was awarded, both as a new Awarded column on the Projects list and in the job header.' },
+  { v: 'v1.4', date: 'July 16, 2026', title: 'Billing and retainage upgrade',
+    body: 'Release retainage in one click at the end of a job, record partial payments, and see all outstanding retainage even on completed jobs. Every row on the Billing page now opens its job, pay apps and change orders can carry a copy of the signed PDF you sent the GC, and pay apps show the amount billed this period next to the running total. Export any billing table or the projects list to a spreadsheet.' },
   { v: 'v1.3', date: 'July 2, 2026', title: 'New jobs arrive automatically from the bid tool',
     body: 'When an estimator marks a bid Won and enters its job number, the project now shows up here on its own at the Awarded stage. No more importing by hand. The same job never creates a duplicate, so a re-save is always safe.' },
   { v: 'v1.3', date: 'July 2, 2026', title: 'Email alerts when a new job lands',
@@ -826,10 +832,27 @@ export default function App() {
   const reload = useCallback(() => api.get('/api/auth/status').then(setAuth), []);
   useEffect(() => { reload(); }, [reload]);
   useEffect(() => { api.get('/api/auth/mode').then(setSso).catch(() => setSso({ ssoOnly: false, bidUrl: '' })); }, []);
+  const baseVersion = useRef(null);
+  const [updateReady, setUpdateReady] = useState(false);
+  useEffect(() => {
+    let stop = false;
+    const check = async () => {
+      try {
+        const r = await api.get('/api/version'); const v = r && r.version;
+        if (!v || stop) return;
+        if (baseVersion.current == null) baseVersion.current = v;
+        else if (v !== baseVersion.current) setUpdateReady(true);
+      } catch (_) {}
+    };
+    check();
+    const id = setInterval(check, 120000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
   const logout = async () => { await api.send('POST', '/api/auth/logout'); reload(); };
   const resetToken = (typeof window !== 'undefined' && window.location.pathname.replace(/\/+$/, '') === '/reset') ? new URLSearchParams(window.location.search).get('token') : null;
   return <>
     <style>{CSS}</style>
+    {updateReady && <div style={{ position: 'sticky', top: 0, zIndex: 9999, background: '#ff6b35', color: '#fff', padding: '8px 16px', textAlign: 'center', fontSize: 14, fontWeight: 600 }}>A new version of the Tracker is available. <button onClick={() => window.location.reload()} style={{ marginLeft: 10, background: '#fff', color: '#ff6b35', border: 'none', borderRadius: 6, padding: '4px 12px', fontWeight: 700, cursor: 'pointer' }}>Update now</button></div>}
     {resetToken ? <ResetPassword token={resetToken} /> : !auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" sso={sso} onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" sso={sso} onDone={reload} /> : <Main user={auth.user} onLogout={logout} />}
   </>;
 }
