@@ -60,6 +60,11 @@ app.get('/api/health', async (req, res) => {
   res.json({ ok: true, service: 'rrfab-project-tracker', db, time: new Date().toISOString() });
 });
 
+// ====== VERSION (public) - drives the update banner ======
+app.get('/api/version', (req, res) => {
+  res.json({ version: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.RAILWAY_DEPLOYMENT_ID || 'dev' });
+});
+
 // ====== AUTH (public) ======
 app.get('/api/auth/status', async (req, res) => {
   try {
