@@ -1,4 +1,5 @@
--- R&R Fabrication Project Tracker
+ZZZ_MARKER_LINE1
+ZZZ_MARKER_LINE2-- R&R Fabrication Project Tracker
 -- PostgreSQL schema, version 2
 -- Seven tables: users, projects, stage_history, deliveries,
 -- change_orders, invoices, documents
@@ -68,6 +69,7 @@ CREATE TABLE projects (
     galv_return_date    date,
     paint_send_date     date,
     paint_complete_date date,
+    needs_setup         boolean     NOT NULL DEFAULT false,  -- true on jobs imported from the bid tool until someone fills in the planning dates
     material_ordered    boolean     NOT NULL DEFAULT false,
     notes               text,
     is_archived         boolean     NOT NULL DEFAULT false,
