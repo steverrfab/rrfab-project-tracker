@@ -1,5 +1,4 @@
-ZZZ_MARKER_LINE1
-ZZZ_MARKER_LINE2-- R&R Fabrication Project Tracker
+-- R&R Fabrication Project Tracker
 -- PostgreSQL schema, version 2
 -- Seven tables: users, projects, stage_history, deliveries,
 -- change_orders, invoices, documents
