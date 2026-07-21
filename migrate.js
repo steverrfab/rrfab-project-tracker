@@ -124,7 +124,14 @@ async function runExtraMigrations() {
     await client.query('ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_status_check');
     // Conflict guard: track when a project row last changed.
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()');
-    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns).');
+    // Setup flag: jobs imported from the bid tool arrive with no planning dates.
+    // Flag them "needs setup" until someone fills in the projected start date.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS needs_setup boolean NOT NULL DEFAULT false');
+    // Backfill: flag existing imported jobs that still have no projected start
+    // and are neither archived nor completed. Set-up jobs (projected start filled)
+    // are skipped, so this stays a no-op on later restarts.
+    await client.query("UPDATE projects SET needs_setup = true WHERE imported_at IS NOT NULL AND projected_start_date IS NULL AND is_archived = false AND status <> 'Completed'");
+    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
   } finally {
