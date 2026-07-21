@@ -310,6 +310,7 @@ function toClient(p, deliveries) {
     updatedAt: p.updated_at ? new Date(p.updated_at).toISOString() : '',
     projectedStartDate: p.projected_start_date || '',
     completedDate: p.completed_date || '',
+    needsSetup: !!p.needs_setup,
   };
 }
 
@@ -439,6 +440,8 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
       [...projectValues(p), d(p.projectedStartDate), id]
     );
     if (p.status === 'Completed') await client.query('UPDATE projects SET completed_date = COALESCE(completed_date, CURRENT_DATE) WHERE id = $1', [id]);
+    // A job is "set up" once its projected start date is filled in; clear the flag.
+    await client.query('UPDATE projects SET needs_setup = false WHERE id = $1 AND projected_start_date IS NOT NULL', [id]);
     if (prev.rows[0].status !== p.status) {
       await client.query(
         'INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)',
@@ -859,9 +862,12 @@ async function notifyNewProject(p) {
       .map(r => '<tr><td style="padding:4px 12px 4px 0;color:#6b7889">' + r[0] + '</td><td style="padding:4px 0;font-weight:600">' + escapeHtml(r[1]) + '</td></tr>').join('');
     const html = '<p>A new job has been added to the R&R Project Tracker at the <b>Awarded</b> stage.</p>' +
       '<table style="border-collapse:collapse;font-size:14px">' + rows + '</table>' +
+      '<p style="margin-top:16px">It is flagged <b>Setup needed</b>. Please open it and set the job up: add the projected start date, fab dates, and delivery sequences. Filling in the projected start date clears the flag.</p>' +
       (link ? ('<p style="margin-top:16px"><a href="' + link + '">Open the tracker</a></p>') : '');
     const text = 'A new job has been added to the R&R Project Tracker (Awarded stage).\n' +
-      'Job number: ' + p.job_number + '\nProject: ' + (p.name || '') + '\nCustomer: ' + (p.customer || '') + (contract ? ('\nContract: ' + contract) : '') + (link ? ('\n\nOpen the tracker: ' + link) : '');
+      'Job number: ' + p.job_number + '\nProject: ' + (p.name || '') + '\nCustomer: ' + (p.customer || '') + (contract ? ('\nContract: ' + contract) : '') +
+      '\n\nThis job is flagged "Setup needed". Please open it and set it up: add the projected start date, fab dates, and delivery sequences. Filling in the projected start date clears the flag.' +
+      (link ? ('\n\nOpen the tracker: ' + link) : '');
     for (const r of recips) {
       try { await mailer.sendMail({ to: r.email, subject, html, text }); }
       catch (e) { console.error('[notify] send to ' + r.email + ' failed:', e.message); }
@@ -881,7 +887,7 @@ async function createProjectFromWonJob(client, j, createdBy) {
   const exists = await client.query('SELECT 1 FROM projects WHERE job_number = $1 LIMIT 1', [jobNo]);
   if (exists.rowCount) return null;
   const ins = await client.query(
-    'INSERT INTO projects (job_number, name, customer, original_contract, cost, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10) RETURNING id',
+    'INSERT INTO projects (job_number, name, customer, original_contract, cost, status, award_date, source_estimate_id, source_bid_number, imported_at, created_by, needs_setup) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10,true) RETURNING id',
     [jobNo, j.project_name || ('Job ' + jobNo), d(j.client_gc), money(j.contract_amount), money(j.cost), 'Awarded', d(String(j.won_at || '').slice(0, 10)), j.estimate_id || null, d(j.bid_number), createdBy || null]);
   await client.query('INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)', [ins.rows[0].id, 'Awarded', createdBy || null]);
   return ins.rows[0].id;
