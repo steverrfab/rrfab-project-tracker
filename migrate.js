@@ -131,7 +131,31 @@ async function runExtraMigrations() {
     // and are neither archived nor completed. Set-up jobs (projected start filled)
     // are skipped, so this stays a no-op on later restarts.
     await client.query("UPDATE projects SET needs_setup = true WHERE imported_at IS NOT NULL AND projected_start_date IS NULL AND is_archived = false AND status <> 'Completed'");
-    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag).');
+    // AIA progress billing: schedule of values per project + per-line G703 detail
+    // on each pay app. Additive; existing single-number invoices keep working.
+    await client.query(`CREATE TABLE IF NOT EXISTS sov_lines (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      item_no text,
+      description text,
+      scheduled_value numeric(14,2) NOT NULL DEFAULT 0,
+      retainage_pct numeric(5,2) NOT NULL DEFAULT 10,
+      sort_order integer,
+      created_at timestamptz NOT NULL DEFAULT now())`);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_sov_lines_project ON sov_lines (project_id)');
+    await client.query(`CREATE TABLE IF NOT EXISTS invoice_lines (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      invoice_id uuid NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      sov_line_id uuid REFERENCES sov_lines(id),
+      item_no text,
+      description text,
+      scheduled_value numeric(14,2) NOT NULL DEFAULT 0,
+      percent_complete numeric(5,2) NOT NULL DEFAULT 0,
+      from_previous numeric(14,2) NOT NULL DEFAULT 0,
+      stored_materials numeric(14,2) NOT NULL DEFAULT 0,
+      retainage_pct numeric(5,2) NOT NULL DEFAULT 10)`);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines (invoice_id)');
+    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
   } finally {
