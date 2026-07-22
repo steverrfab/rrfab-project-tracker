@@ -122,6 +122,7 @@ tfoot td{border-top:1px solid var(--bd);border-bottom:none;font-weight:700;backg
 .empty{color:#9aa0ab;font-size:12.5px;padding:8px 0}
 .ov{position:fixed;inset:0;background:rgba(20,22,30,.45);display:flex;align-items:center;justify-content:center;z-index:50}
 .modal{background:#fff;border:1px solid var(--bd);border-radius:14px;padding:24px;width:500px;max-width:92vw;max-height:88vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+.modal.wide{width:1060px}
 .modal h2{margin:0 0 16px;font-size:17px}
 .field{margin-bottom:12px}.field label{display:block;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;font-weight:600}
 .field input,.field select,.field textarea{width:100%}
@@ -136,6 +137,19 @@ tfoot td{border-top:1px solid var(--bd);border-bottom:none;font-weight:700;backg
 .err{color:var(--r);font-size:12.5px;margin:8px 0}
 .flag{font-size:11px;font-weight:700;color:var(--r)}
 .setup{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;white-space:nowrap}
+input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+input[type=number]{-moz-appearance:textfield}
+.numin{display:inline-flex;align-items:center;border:1px solid var(--bd);border-radius:6px;background:#fff;overflow:hidden;width:100%}
+.numin input{border:none;outline:none;width:100%;padding:6px 8px;font:inherit;text-align:right;background:transparent}
+.numin .adorn{padding:0 7px;color:var(--mut);font-size:12px;background:var(--bg);align-self:stretch;display:flex;align-items:center}
+.numin .adorn.pre{border-right:1px solid var(--bd)}
+.numin .adorn.suf{border-left:1px solid var(--bd)}
+.sovtbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.sovtbl th{font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--mut);text-align:right;padding:4px 6px;border-bottom:1px solid var(--bd);white-space:nowrap}
+.sovtbl th.l{text-align:left}
+.sovtbl td{padding:4px 6px;border-bottom:1px solid #f0f1f4;text-align:right;vertical-align:middle}
+.sovtbl td.l{text-align:left}
+.sovtbl input.txt{width:100%;border:1px solid var(--bd);border-radius:6px;padding:6px 8px;font:inherit;background:#fff}
 .board{display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;margin-top:14px}
 .bcol{min-width:230px;width:230px;flex:0 0 auto;background:#f5f6f8;border:1px solid var(--bd);border-radius:12px;padding:10px}
 .bcol h4{margin:0 0 10px;font-size:12px;display:flex;justify-content:space-between;align-items:center}
@@ -193,7 +207,19 @@ function AuthScreen({ mode, sso, onDone }) {
   </div></div>;
 }
 
-function Modal({ children, onClose }) { return <div className="ov" onClick={e => { if (e.target === e.currentTarget) onClose(); }}><div className="modal">{children}</div></div>; }
+function Modal({ children, onClose, wide }) { return <div className="ov" onClick={e => { if (e.target === e.currentTarget) onClose(); }}><div className={'modal' + (wide ? ' wide' : '')}>{children}</div></div>; }
+// Plain-text number input: no spinner arrows, blank with a 0 placeholder,
+// select-on-focus so typing replaces, optional $ / % adornment. Value is kept
+// as the raw string the user types (parse with parseFloat where needed).
+function NumInput({ value, onChange, pre, suf, placeholder = '0' }) {
+  return <span className="numin">
+    {pre && <span className="adorn pre">{pre}</span>}
+    <input type="text" inputMode="decimal" placeholder={placeholder} value={value == null ? '' : value}
+      onFocus={e => e.target.select()}
+      onChange={e => { const v = e.target.value; if (v === '' || /^-?\d*\.?\d*$/.test(v)) onChange(v); }} />
+    {suf && <span className="adorn suf">{suf}</span>}
+  </span>;
+}
 
 const blankProject = () => ({ jobNumber: '', name: '', customer: '', sellPrice: '', cost: '', status: 'Awarded', drawingStatus: 'N/A', materialOrdered: false, pm: 'Joe Jenkins', awardDate: today(), projectedStartDate: '', fabStartDate: '', galvSendDate: '', galvReturnDate: '', paintSendDate: '', paintCompleteDate: '', notes: '', deliveries: [] });
 
@@ -323,12 +349,12 @@ function ItemModal({ item, onClose }) {
 }
 
 function Detail({ id, user, onBack }) {
-  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [seqs, setSeqs] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({});
+  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [seqs, setSeqs] = useState([]); const [sov, setSov] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({});
   const load = useCallback(async () => {
     const all = await api.get('/api/projects'); setP(all.find(x => x.id === id) || null);
     setHist(await api.get('/api/projects/' + id + '/stage-history'));
     setCos(await api.get('/api/projects/' + id + '/change-orders'));
-    if (can.seeMoney(user.role)) setInvs(await api.get('/api/projects/' + id + '/invoices'));
+    if (can.seeMoney(user.role)) { setInvs(await api.get('/api/projects/' + id + '/invoices')); try { setSov(await api.get('/api/projects/' + id + '/sov')); } catch (_) { setSov([]); } }
     setDocs(await api.get('/api/projects/' + id + '/documents'));
     setNotes(await api.get('/api/projects/' + id + '/notes'));
     setSeqs(await api.get('/api/projects/' + id + '/sequences'));
@@ -347,7 +373,19 @@ function Detail({ id, user, onBack }) {
   const seeMoney = can.seeMoney(user.role);
   // Map each pay app (invoice) to its attached signed pay app document, if any.
   const payAppDoc = {}; docs.forEach(f => { if (f.category === 'pay_app' && f.invoiceId) payAppDoc[f.invoiceId] = f; });
+  const genXlsx = {}, genPdf = {}; docs.forEach(f => { if (f.category === 'pay_app_xlsx' && f.invoiceId) genXlsx[f.invoiceId] = f; if (f.category === 'pay_app_pdf' && f.invoiceId) genPdf[f.invoiceId] = f; });
   const coDoc = {}; docs.forEach(f => { if (f.category === 'co' && f.changeOrderId) coDoc[f.changeOrderId] = f; });
+  const [syncing, setSyncing] = useState(false); const [genId, setGenId] = useState(null);
+  const syncSov = async () => {
+    setSyncing(true);
+    try { const j = await api.send('POST', '/api/projects/' + p.id + '/sync-sov'); await load(); alert('Synced ' + (j.count || 0) + ' schedule-of-values line(s) from the bid.'); }
+    catch (e) { alert(e.message); } finally { setSyncing(false); }
+  };
+  const genPayApp = async a => {
+    setGenId(a.id);
+    try { const j = await api.send('POST', '/api/invoices/' + a.id + '/generate'); await load(); if (j.pdfError) alert('Excel generated and attached. The PDF step was skipped on the server: ' + j.pdfError); }
+    catch (e) { alert(e.message); } finally { setGenId(null); }
+  };
   const releaseRetainage = async () => {
     const nextNo = (invs.reduce((m, a) => Math.max(m, a.applicationNumber), 0)) + 1;
     if (!confirm('Release retainage?\n\nThis creates the final pay app (#' + nextNo + ') billing out the ' + fmt$(retHeld) + ' currently held. Work completed stays the same and retainage drops to zero, so the amount due on it is exactly the retainage held.')) return;
@@ -410,9 +448,9 @@ function Detail({ id, user, onBack }) {
     </div>
     </div>
 
-    {seeMoney && <div className="card"><h3>Pay applications {eI ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> : <span className="note">read-only</span>}</h3>
+    {seeMoney && <div className="card"><h3>Pay applications {eI ? <><button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> {p.jobNumber && <button className="btn-ghost btn-sm" disabled={syncing} onClick={syncSov} title="Pull the schedule of values from the bid tool">{syncing ? 'Syncing…' : (sov.length ? 'Re-sync schedule from bid' : 'Sync schedule from bid')}</button>} {sov.length > 0 && <span className="note" style={{ marginLeft: 4 }}>{sov.length} SOV line{sov.length === 1 ? '' : 's'} · {fmt$(sov.reduce((s, l) => s + Number(l.scheduledValue || 0), 0))} scheduled</span>}</> : <span className="note">read-only</span>}</h3>
       {invs.length ? <table><thead><tr><th>App #</th><th>Period</th><th className="right">Completed to date</th><th className="right">Retainage</th><th className="right">This period</th><th className="right">Paid</th><th>Status</th><th /></tr></thead>
-        <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}{a.isRetainageRelease && <span className="chip" style={{ marginLeft: 6, color: '#0d9488', borderColor: '#99f6e4', background: '#f0fdfa' }}>Retainage release</span>}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right" style={{ whiteSpace: 'nowrap' }}>{payAppDoc[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + payAppDoc[a.id].id + '/download'} title={payAppDoc[a.id].fileName}>📎 View pay app</a>} {eI && a.status !== 'Paid' && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>} {eI && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payapp', data: a })}>Edit</button>} {eI && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delInv(a)}>Delete</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
+        <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}{a.isRetainageRelease && <span className="chip" style={{ marginLeft: 6, color: '#0d9488', borderColor: '#99f6e4', background: '#f0fdfa' }}>Retainage release</span>}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right" style={{ whiteSpace: 'nowrap' }}>{payAppDoc[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + payAppDoc[a.id].id + '/download'} title={payAppDoc[a.id].fileName}>📎 View pay app</a>} {genPdf[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + genPdf[a.id].id + '/download'} title={genPdf[a.id].fileName}>📄 G702 PDF</a>} {genXlsx[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + genXlsx[a.id].id + '/download'} title={genXlsx[a.id].fileName}>⬇ Excel</a>} {eI && !a.isRetainageRelease && <button className="btn-ghost btn-sm" disabled={genId === a.id} onClick={() => genPayApp(a)}>{genId === a.id ? 'Generating…' : (genXlsx[a.id] ? 'Re-generate G702/G703' : 'Generate G702/G703')}</button>} {eI && a.status !== 'Paid' && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>} {eI && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payapp', data: a })}>Edit</button>} {eI && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delInv(a)}>Delete</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
     </div>}
 
 
@@ -422,7 +460,7 @@ function Detail({ id, user, onBack }) {
 
     {modal && modal.t === 'project' && <ProjectModal initial={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'co' && <CoModal projectId={id} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
-    {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} existing={modal.data} contractSum={contractSum} docs={docs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
+    {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} existing={modal.data} contractSum={contractSum} sov={sov} docs={docs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'payment' && <PaymentModal inv={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'item' && <ItemModal item={modal.data} onClose={() => setModal(null)} />}
     {modal && modal.t === 'seq' && <SequenceModal projectId={id} seq={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
@@ -490,7 +528,7 @@ function CoModal({ projectId, onClose, onSaved }) {
   </Modal>;
 }
 
-function PayAppModal({ projectId, prevRows, existing, contractSum, docs, onClose, onSaved }) {
+function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, onClose, onSaved }) {
   const editing = !!(existing && existing.id);
   const existingDoc = editing ? (docs || []).find(dc => dc.category === 'pay_app' && dc.invoiceId === existing.id) : null;
   const appNo = editing ? existing.applicationNumber : (prevRows.reduce((m, a) => Math.max(m, a.applicationNumber), 0)) + 1;
@@ -498,24 +536,60 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, docs, onClose
   const prevApp = before[before.length - 1];
   const prevELR = prevApp ? Number(prevApp.earnedLessRetainage) : 0;
   const prevCompleted = prevApp ? Number(prevApp.workCompletedToDate) : 0;
+  const useLines = (sov || []).length > 0;
+  const fromNum = n => (n == null || Number(n) === 0) ? '' : String(n);
+  const num = v => parseFloat(v) || 0;
+
   const [a, setA] = useState(editing
     ? { applicationNumber: existing.applicationNumber, periodEnd: existing.periodEnd || '', workCompletedToDate: existing.workCompletedToDate, retainagePct: existing.retainagePct, status: existing.status, submittedDate: existing.submittedDate || '', approvedDate: existing.approvedDate || '', notes: existing.notes || '', amountPaid: existing.amountPaid || '', paidDate: existing.paidDate || '' }
     : { applicationNumber: appNo, periodEnd: '', workCompletedToDate: '', retainagePct: 10, status: 'Draft' });
-  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
   const set = k => e => setA({ ...a, [k]: e.target.value });
-  const comp = parseFloat(a.workCompletedToDate) || 0, pct = parseFloat(a.retainagePct) || 0;
-  const ret = comp * pct / 100, elr = comp - ret, due = elr - prevELR;
+  const [lines, setLines] = useState([]); const [stdRet, setStdRet] = useState('10'); const [seeding, setSeeding] = useState(useLines);
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
+  const keySeq = useRef(0); const mkKey = () => 'k' + (keySeq.current++);
+
+  useEffect(() => {
+    if (!useLines) return;
+    let alive = true;
+    (async () => {
+      try {
+        let seeded = [];
+        if (editing) {
+          const stored = await api.get('/api/invoices/' + existing.id + '/lines').catch(() => []);
+          if (stored && stored.length) seeded = stored.map(l => ({ key: mkKey(), sovLineId: l.sovLineId || null, itemNo: l.itemNo || '', description: l.description || '', scheduledValue: fromNum(l.scheduledValue), percentComplete: fromNum(l.percentComplete), storedMaterials: fromNum(l.storedMaterials), retainagePct: fromNum(l.retainagePct), fromPrevious: Number(l.fromPrevious || 0) }));
+        }
+        if (!seeded.length) {
+          const pSov = new Map(), pItem = new Map();
+          if (prevApp) { const pl = await api.get('/api/invoices/' + prevApp.id + '/lines').catch(() => []); for (const r of (pl || [])) { const t = Number(r.scheduledValue || 0) * Number(r.percentComplete || 0) / 100 + Number(r.storedMaterials || 0); if (r.sovLineId) pSov.set(r.sovLineId, t); if (r.itemNo != null) pItem.set(String(r.itemNo), t); } }
+          seeded = (sov || []).map(s => ({ key: mkKey(), sovLineId: s.id, itemNo: s.itemNo || '', description: s.description || '', scheduledValue: fromNum(s.scheduledValue), percentComplete: '', storedMaterials: '', retainagePct: fromNum(s.retainagePct), fromPrevious: pSov.has(s.id) ? pSov.get(s.id) : (pItem.get(String(s.itemNo)) || 0) }));
+        }
+        if (alive) { setLines(seeded); setSeeding(false); }
+      } catch (_) { if (alive) setSeeding(false); }
+    })();
+    return () => { alive = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const lineCalc = l => { const sched = num(l.scheduledValue), pct = num(l.percentComplete), stored = num(l.storedMaterials), rp = num(l.retainagePct); const total = sched * pct / 100 + stored; return { sched, total, thisPeriod: total - Number(l.fromPrevious || 0), balance: sched - total, retainage: total * rp / 100 }; };
+  const totals = lines.reduce((t, l) => { const c = lineCalc(l); t.sched += c.sched; t.work += c.total; t.ret += c.retainage; t.thisPeriod += c.thisPeriod; return t; }, { sched: 0, work: 0, ret: 0, thisPeriod: 0 });
+  const singleComp = num(a.workCompletedToDate), singleRet = singleComp * num(a.retainagePct) / 100;
+  const work = useLines ? totals.work : singleComp, retTotal = useLines ? totals.ret : singleRet;
+  const elr = work - retTotal, due = elr - prevELR;
+
+  const updLine = (key, k, v) => setLines(ls => ls.map(l => l.key === key ? { ...l, [k]: v } : l));
+  const addLine = () => setLines(ls => [...ls, { key: mkKey(), sovLineId: null, itemNo: '', description: '', scheduledValue: '', percentComplete: '', storedMaterials: '', retainagePct: stdRet, fromPrevious: 0 }]);
+  const rmLine = key => setLines(ls => ls.filter(l => l.key !== key));
+  const applyRetAll = () => setLines(ls => ls.map(l => ({ ...l, retainagePct: stdRet })));
+
   const save = async () => {
-    // Over/under billing guard: warn, but let the user proceed on purpose.
-    if (contractSum > 0 && comp > contractSum + 0.005 && !confirm('Heads up: work completed to date (' + fmt$(comp) + ') is more than the contract plus approved change orders (' + fmt$(contractSum) + ').\n\nSave anyway?')) return;
-    if (comp < prevCompleted - 0.005 && !confirm('Heads up: work completed to date (' + fmt$(comp) + ') is less than the previous pay app (' + fmt$(prevCompleted) + '). Cumulative billing normally only goes up.\n\nSave anyway?')) return;
+    if (contractSum > 0 && work > contractSum + 0.005 && !confirm('Heads up: work completed to date (' + fmt$(work) + ') is more than the contract plus approved change orders (' + fmt$(contractSum) + ').\n\nSave anyway?')) return;
+    if (work < prevCompleted - 0.005 && !confirm('Heads up: work completed to date (' + fmt$(work) + ') is less than the previous pay app (' + fmt$(prevCompleted) + '). Cumulative billing normally only goes up.\n\nSave anyway?')) return;
     setBusy(true); setErr(null);
     try {
+      const payload = { ...a };
+      if (useLines) { payload.retainagePct = num(stdRet); payload.lines = lines.map(l => ({ sovLineId: l.sovLineId || null, itemNo: l.itemNo, description: l.description, scheduledValue: num(l.scheduledValue), percentComplete: num(l.percentComplete), storedMaterials: num(l.storedMaterials), retainagePct: num(l.retainagePct) })); }
       let invId = editing ? existing.id : null;
-      if (editing) await api.send('PUT', '/api/invoices/' + existing.id, a);
-      else { const r = await api.send('POST', '/api/projects/' + projectId + '/invoices', a); invId = r && r.id; }
-      // If a pay app copy was chosen, upload it linked to this invoice. Picking a
-      // new file on edit replaces the one already attached.
+      if (editing) await api.send('PUT', '/api/invoices/' + existing.id, payload);
+      else { const r = await api.send('POST', '/api/projects/' + projectId + '/invoices', payload); invId = r && r.id; }
       if (file && invId) {
         if (existingDoc) { try { await api.send('DELETE', '/api/documents/' + existingDoc.id); } catch (_) {} }
         const fd = new FormData(); fd.append('file', file); fd.append('category', 'pay_app'); fd.append('invoiceId', invId);
@@ -525,17 +599,62 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, docs, onClose
       onSaved();
     } catch (e) { setErr(e.message); setBusy(false); }
   };
-  return <Modal onClose={onClose}><h2>{editing ? 'Edit pay application #' + existing.applicationNumber : 'Add pay application #' + appNo}</h2>
-    {editing && <div className="field"><label>App #</label><input type="number" value={a.applicationNumber} onChange={set('applicationNumber')} /></div>}
-    <div className="field"><label>Period through</label><input type="date" value={a.periodEnd} onChange={set('periodEnd')} /></div>
-    <div className="field"><label>Work completed &amp; stored to date ($)</label><input type="number" value={a.workCompletedToDate} onChange={set('workCompletedToDate')} /></div>
-    <div className="field"><label>Retainage %</label><input type="number" value={a.retainagePct} onChange={set('retainagePct')} /></div>
-    <div className="field"><label>Status</label><select value={a.status} onChange={set('status')}>{PAYAPP_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
-    {editing && <div className="row2"><div className="field"><label>Amount paid ($)</label><input type="number" value={a.amountPaid} onChange={set('amountPaid')} /></div><div className="field"><label>Paid date</label><input type="date" value={a.paidDate} onChange={set('paidDate')} /></div></div>}
-    <div className="calc"><div><span>Completed to date</span><span className="num">{fmt$(comp)}</span></div><div><span>Less retainage ({pct || 0}%)</span><span className="num">- {fmt$(ret)}</span></div><div><span>Earned less retainage</span><span className="num">{fmt$(elr)}</span></div><div><span>Less previous billings</span><span className="num">- {fmt$(prevELR)}</span></div><div className="tot"><span>This period (current payment due)</span><span className="num">{fmt$(due)}</span></div></div>
-    <div className="field" style={{ marginTop: 12 }}><label>Attach pay app copy (PDF sent to GC)</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} />{existingDoc && <div className="note" style={{ marginTop: 6 }}>Attached: <a href={'/api/documents/' + existingDoc.id + '/download'} style={{ color: 'var(--ac)' }}>{existingDoc.fileName}</a>{file ? '. Saving will replace it.' : ''}</div>}</div>
+
+  return <Modal onClose={onClose} wide={useLines}><h2>{editing ? 'Edit pay application #' + existing.applicationNumber : 'Add pay application #' + appNo}</h2>
+    <div className="row2">
+      {editing && <div className="field"><label>App #</label><input type="number" value={a.applicationNumber} onChange={set('applicationNumber')} /></div>}
+      <div className="field"><label>Period through</label><input type="date" value={a.periodEnd} onChange={set('periodEnd')} /></div>
+      <div className="field"><label>Status</label><select value={a.status} onChange={set('status')}>{PAYAPP_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
+    </div>
+    {editing && <div className="row2"><div className="field"><label>Amount paid ($)</label><NumInput pre="$" value={a.amountPaid} onChange={v => setA({ ...a, amountPaid: v })} /></div><div className="field"><label>Paid date</label><input type="date" value={a.paidDate} onChange={set('paidDate')} /></div></div>}
+
+    {useLines ? <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '12px 0 6px', flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 13 }}>Schedule of values (G703)</b>
+        <div className="spacer" />
+        <span className="note">Standard retainage</span>
+        <span style={{ width: 84 }}><NumInput value={stdRet} onChange={setStdRet} suf="%" /></span>
+        <button className="btn-ghost btn-sm" type="button" onClick={applyRetAll}>Apply to all</button>
+      </div>
+      {seeding ? <div className="note">Loading schedule…</div> :
+      <div style={{ overflowX: 'auto', maxHeight: 360, overflowY: 'auto' }}>
+        <table className="sovtbl"><thead><tr>
+          <th className="l">Item</th><th className="l">Description</th><th>Scheduled</th><th>From prev</th><th>% Compl</th><th>Stored</th><th>Ret %</th><th>Total</th><th>This period</th><th>Retainage</th><th>Balance</th><th></th>
+        </tr></thead>
+        <tbody>{lines.map(l => { const c = lineCalc(l); return <tr key={l.key}>
+          <td className="l" style={{ width: 52 }}><input className="txt" value={l.itemNo} onChange={e => updLine(l.key, 'itemNo', e.target.value)} /></td>
+          <td className="l" style={{ minWidth: 150 }}><input className="txt" value={l.description} onChange={e => updLine(l.key, 'description', e.target.value)} /></td>
+          <td style={{ width: 110 }}><NumInput pre="$" value={l.scheduledValue} onChange={v => updLine(l.key, 'scheduledValue', v)} /></td>
+          <td className="muted" style={{ width: 88 }}>{fmt$(l.fromPrevious)}</td>
+          <td style={{ width: 76 }}><NumInput suf="%" value={l.percentComplete} onChange={v => updLine(l.key, 'percentComplete', v)} /></td>
+          <td style={{ width: 98 }}><NumInput pre="$" value={l.storedMaterials} onChange={v => updLine(l.key, 'storedMaterials', v)} /></td>
+          <td style={{ width: 68 }}><NumInput suf="%" value={l.retainagePct} onChange={v => updLine(l.key, 'retainagePct', v)} /></td>
+          <td>{fmt$(c.total)}</td><td>{fmt$(c.thisPeriod)}</td><td>{fmt$(c.retainage)}</td><td>{fmt$(c.balance)}</td>
+          <td><button className="btn-ghost btn-sm" type="button" title="Remove line" style={{ color: 'var(--r)' }} onClick={() => rmLine(l.key)}>×</button></td>
+        </tr>; })}</tbody>
+        <tfoot><tr style={{ fontWeight: 700 }}>
+          <td className="l" colSpan={2}>Totals</td><td>{fmt$(totals.sched)}</td><td /><td /><td /><td /><td>{fmt$(totals.work)}</td><td>{fmt$(totals.thisPeriod)}</td><td>{fmt$(totals.ret)}</td><td>{fmt$(totals.sched - totals.work)}</td><td />
+        </tr></tfoot>
+        </table>
+      </div>}
+      <div style={{ marginTop: 6, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="btn-ghost btn-sm" type="button" onClick={addLine}>+ Add line</button>
+        <span className="note">Contract re-foots to {fmt$(totals.sched)}{Math.abs(totals.sched - contractSum) > 0.5 ? '  (job contract sum ' + fmt$(contractSum) + ')' : ''}</span>
+      </div>
+    </> : <>
+      <div className="note" style={{ margin: '10px 0' }}>No schedule of values on this job yet. Enter a single completed-to-date, or use “Sync schedule from bid” on the pay-app card to bill line by line.</div>
+      <div className="row2">
+        <div className="field"><label>Work completed &amp; stored to date</label><NumInput pre="$" value={a.workCompletedToDate} onChange={v => setA({ ...a, workCompletedToDate: v })} /></div>
+        <div className="field"><label>Retainage</label><NumInput suf="%" value={a.retainagePct} onChange={v => setA({ ...a, retainagePct: v })} /></div>
+      </div>
+    </>}
+
+    <div className="calc" style={{ marginTop: 12 }}><div><span>Completed to date</span><span className="num">{fmt$(work)}</span></div><div><span>Less retainage</span><span className="num">- {fmt$(retTotal)}</span></div><div><span>Earned less retainage</span><span className="num">{fmt$(elr)}</span></div><div><span>Less previous billings</span><span className="num">- {fmt$(prevELR)}</span></div><div className="tot"><span>This period (current payment due)</span><span className="num">{fmt$(due)}</span></div></div>
+
+    <div className="field" style={{ marginTop: 10 }}><label>Notes</label><input value={a.notes || ''} onChange={set('notes')} /></div>
+    <div className="field" style={{ marginTop: 6 }}><label>Attach signed pay app copy (PDF sent to GC)</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} />{existingDoc && <div className="note" style={{ marginTop: 6 }}>Attached: <a href={'/api/documents/' + existingDoc.id + '/download'} style={{ color: 'var(--ac)' }}>{existingDoc.fileName}</a>{file ? '. Saving will replace it.' : ''}</div>}</div>
     {err && <div className="err">{err}</div>}
-    <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save</button></div>
+    <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy || seeding} onClick={save}>Save</button></div>
   </Modal>;
 }
 

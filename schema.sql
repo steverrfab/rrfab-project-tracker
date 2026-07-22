@@ -183,3 +183,41 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_project       ON documents (project_id);
 CREATE INDEX idx_documents_change_order  ON documents (change_order_id);
 CREATE INDEX idx_documents_invoice       ON documents (invoice_id);
+
+-- ---------------------------------------------------------------------------
+-- SOV_LINES  (schedule of values, per project)
+-- The AIA G703 line items, pulled from the bid tool's SOV feed. retainage_pct
+-- is a per-line rate (0 = a line that holds no retainage, e.g. freight).
+-- ---------------------------------------------------------------------------
+CREATE TABLE sov_lines (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id      uuid        NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    item_no         text,
+    description     text,
+    scheduled_value numeric(14,2) NOT NULL DEFAULT 0,
+    retainage_pct   numeric(5,2)  NOT NULL DEFAULT 10,   -- per-line rate; 0 = no retainage
+    sort_order      integer,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_sov_lines_project ON sov_lines (project_id);
+
+-- ---------------------------------------------------------------------------
+-- INVOICE_LINES  (per-line G703 progress on a pay app)
+-- The invoices row stays the source of truth for the cover (G702) math; these
+-- rows carry the line detail. Every line's Total (G) sums up into the invoice's
+-- work_completed_to_date and every line's retainage sums into retainage_held,
+-- so invoiceRows(), the billing dashboard, and retainage release keep working.
+-- ---------------------------------------------------------------------------
+CREATE TABLE invoice_lines (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    invoice_id       uuid        NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    sov_line_id      uuid        REFERENCES sov_lines(id),
+    item_no          text,
+    description      text,
+    scheduled_value  numeric(14,2) NOT NULL DEFAULT 0,
+    percent_complete numeric(5,2)  NOT NULL DEFAULT 0,   -- cumulative %, the driver the user enters
+    from_previous    numeric(14,2) NOT NULL DEFAULT 0,   -- prior app's Total (G) for this line
+    stored_materials numeric(14,2) NOT NULL DEFAULT 0,
+    retainage_pct    numeric(5,2)  NOT NULL DEFAULT 10    -- copied from sov_lines, editable per app
+);
+CREATE INDEX idx_invoice_lines_invoice ON invoice_lines (invoice_id);
