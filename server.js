@@ -5,6 +5,7 @@ const auth = require('./auth');
 const mailer = require('./mailer');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const aia = require('./aiaExport');
 
 const app = express();
 app.use(express.json());
@@ -181,7 +182,78 @@ app.post('/api/integration/won-job', async (req, res) => {
   if (!newId) return res.json({ ok: true, created: false, job_number: jobNo, message: 'already in the tracker' });
   notifyNewProject({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount })
     .catch(e => console.error('[notify] failed:', e.message));
+  kickoffSovSync(newId, j.estimate_id);
   res.json({ ok: true, created: true, job_number: jobNo, project_id: newId });
+});
+
+// ====== SCHEDULE OF VALUES SYNC (from the bid tool) ======
+// Bid integration config (same env vars as /api/import/won-jobs).
+function bidConfig() {
+  const base = process.env.BID_API_URL, key = process.env.TRACKER_KEY;
+  if (!base || !key) return null;
+  return { base: base.endsWith('/') ? base.slice(0, -1) : base, key };
+}
+async function fetchSovFeed(cfg, estimateId) {
+  const r = await fetch(cfg.base + '/api/estimates/feed/sov/' + encodeURIComponent(estimateId), { headers: { 'X-Integration-Key': cfg.key } });
+  if (!r.ok) throw new Error('Bid tool refused the SOV request (status ' + r.status + ')');
+  return r.json();
+}
+// Pull the SOV feed and reconcile it onto sov_lines by item_no. Existing lines
+// are updated in place (so their ids, per-line retainage overrides, and any
+// invoice_lines progress that references them are preserved); new items are
+// inserted; items no longer in the feed are left alone so nothing referencing
+// them breaks.
+async function syncSovLines(client, projectId, estimateId) {
+  if (!estimateId) return { ok: false, reason: 'no estimate id on project' };
+  const cfg = bidConfig();
+  if (!cfg) return { ok: false, reason: 'bid integration not configured' };
+  const feed = await fetchSovFeed(cfg, estimateId);
+  const lines = (feed && feed.sov) || [];
+  const existing = (await client.query('SELECT id, item_no FROM sov_lines WHERE project_id = $1', [projectId])).rows;
+  const byItem = new Map(existing.map(r => [String(r.item_no == null ? '' : r.item_no), r.id]));
+  let i = 0;
+  for (const l of lines) {
+    const itemNo = String(l.item_no == null ? '' : l.item_no);
+    const sched = money(l.scheduled_value) || 0;
+    const sort = l.position != null ? Number(l.position) : i;
+    const hit = byItem.get(itemNo);
+    if (hit) await client.query('UPDATE sov_lines SET description=$1, scheduled_value=$2, sort_order=$3 WHERE id=$4', [d(l.description), sched, sort, hit]);
+    else await client.query('INSERT INTO sov_lines (project_id, item_no, description, scheduled_value, retainage_pct, sort_order) VALUES ($1,$2,$3,$4,10,$5)', [projectId, itemNo || null, d(l.description), sched, sort]);
+    i++;
+  }
+  return { ok: true, count: lines.length };
+}
+// Fire-and-forget sync on its own connection so a bid-tool hiccup never blocks
+// or rolls back the caller (used right after a won job is created).
+function kickoffSovSync(projectId, estimateId) {
+  if (!estimateId || !bidConfig()) return;
+  (async () => {
+    const c = await pool.connect();
+    try { await syncSovLines(c, projectId, estimateId); }
+    catch (e) { console.error('[sov] sync failed for project ' + projectId + ':', e.message); }
+    finally { c.release(); }
+  })();
+}
+// The bid tool's "Sync to Tracker" button posts here (key-protected, above the
+// login wall like /api/integration/won-job). Re-pulls the SOV, preserving
+// retainage overrides and pay-app progress. 404 if the job isn't here yet.
+app.post('/api/integration/resync-sov', async (req, res) => {
+  const key = process.env.TRACKER_KEY || '';
+  const provided = req.get('X-Integration-Key') || '';
+  if (!key || !provided || !safeEqual(provided, key)) return res.status(401).json({ error: 'invalid integration key' });
+  const b = req.body || {};
+  const jobNo = String(b.job_number || '').trim();
+  const estId = b.estimate_id || null;
+  const client = await pool.connect();
+  try {
+    let proj = null;
+    if (jobNo) proj = (await client.query('SELECT id, source_estimate_id FROM projects WHERE job_number = $1 LIMIT 1', [jobNo])).rows[0];
+    if (!proj && estId) proj = (await client.query('SELECT id, source_estimate_id FROM projects WHERE source_estimate_id = $1 LIMIT 1', [estId])).rows[0];
+    if (!proj) return res.status(404).json({ error: 'project not in tracker' });
+    await syncSovLines(client, proj.id, estId || proj.source_estimate_id);
+    res.json({ ok: true });
+  } catch (err) { console.error('[resync-sov]', err); res.status(500).json({ error: 'Something went wrong on the server' }); }
+  finally { client.release(); }
 });
 
 // ====== SSO FROM THE BID TOOL (public; mounted before the auth wall) ======
@@ -558,6 +630,49 @@ function invoiceRows(rows) {
     };
   });
 }
+// Build the per-line G703 detail for a pay app from the raw lines the client
+// sends, seeding each line's "from previous" from the immediately-prior app's
+// Total (G) for the same SOV line, and returning the roll-up (sum of line
+// totals, sum of line retainage) that feeds the invoices row so invoiceRows(),
+// the billing dashboard, and retainage release keep working unchanged.
+async function computeInvoiceLines(client, projectId, appNo, excludeInvId, rawLines) {
+  const lines = Array.isArray(rawLines) ? rawLines : [];
+  const prior = (await client.query(
+    `SELECT id FROM invoices WHERE project_id=$1 AND application_number < $2 AND is_retainage_release = false
+       AND ($3::uuid IS NULL OR id <> $3) ORDER BY application_number DESC LIMIT 1`,
+    [projectId, appNo, excludeInvId || null])).rows[0];
+  const priorBySov = new Map(), priorByItem = new Map();
+  if (prior) {
+    const pl = (await client.query('SELECT sov_line_id, item_no, scheduled_value, percent_complete, stored_materials FROM invoice_lines WHERE invoice_id=$1', [prior.id])).rows;
+    for (const r of pl) {
+      const total = Number(r.scheduled_value || 0) * Number(r.percent_complete || 0) / 100 + Number(r.stored_materials || 0);
+      if (r.sov_line_id) priorBySov.set(r.sov_line_id, total);
+      if (r.item_no != null) priorByItem.set(String(r.item_no), total);
+    }
+  }
+  const r2 = n => Math.round(n * 100) / 100;
+  let workCompleted = 0, retainageHeld = 0;
+  const rows = lines.map(l => {
+    const sched = money(l.scheduledValue) || 0;
+    const pct = money(l.percentComplete) || 0;
+    const stored = money(l.storedMaterials) || 0;
+    const retPct = (l.retainagePct === '' || l.retainagePct == null) ? 10 : (money(l.retainagePct) || 0);
+    const total = sched * pct / 100 + stored;
+    const fromPrev = (l.sovLineId && priorBySov.has(l.sovLineId)) ? priorBySov.get(l.sovLineId)
+      : (l.itemNo != null && priorByItem.has(String(l.itemNo))) ? priorByItem.get(String(l.itemNo)) : 0;
+    workCompleted += total; retainageHeld += total * retPct / 100;
+    return { sovLineId: l.sovLineId || null, itemNo: d(l.itemNo), description: d(l.description), scheduledValue: sched, percentComplete: pct, fromPrevious: r2(fromPrev), storedMaterials: stored, retainagePct: retPct };
+  });
+  return { rows, workCompleted: r2(workCompleted), retainageHeld: r2(retainageHeld) };
+}
+async function writeInvoiceLines(client, invoiceId, rows) {
+  await client.query('DELETE FROM invoice_lines WHERE invoice_id=$1', [invoiceId]);
+  for (const r of rows) {
+    await client.query(
+      'INSERT INTO invoice_lines (invoice_id, sov_line_id, item_no, description, scheduled_value, percent_complete, from_previous, stored_materials, retainage_pct) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      [invoiceId, r.sovLineId, r.itemNo, r.description, r.scheduledValue, r.percentComplete, r.fromPrevious, r.storedMaterials, r.retainagePct]);
+  }
+}
 const approvedCoTotal = co => co.filter(c => c.status === 'Approved' || c.status === 'Paid').reduce((s, c) => s + Number(c.amount || 0), 0);
 const daysSince = ds => ds ? Math.round((Date.now() - new Date(ds + 'T00:00:00').getTime()) / 86400000) : 0;
 
@@ -616,31 +731,50 @@ app.get('/api/projects/:id/invoices', requireFinancial, async (req, res) => {
 });
 app.post('/api/projects/:id/invoices', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   const a = req.body;
-  const held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null;
+  const appNo = parseInt(a.applicationNumber) || 1;
+  const hasLines = Array.isArray(a.lines) && a.lines.length > 0;
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    let workCompleted, held, computed = null;
+    if (hasLines) { computed = await computeInvoiceLines(client, req.params.id, appNo, null, a.lines); workCompleted = computed.workCompleted; held = computed.retainageHeld; }
+    else { workCompleted = money(a.workCompletedToDate) || 0; held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null; }
+    const ins = await client.query(
       `INSERT INTO invoices (project_id, application_number, period_end, work_completed_to_date, retainage_pct, retainage_held, status, submitted_date, notes, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-      [req.params.id, parseInt(a.applicationNumber) || 1, d(a.periodEnd), money(a.workCompletedToDate) || 0, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.notes), req.user.id]);
-    res.json({ ok: true, id: rows[0].id });
+      [req.params.id, appNo, d(a.periodEnd), workCompleted, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.notes), req.user.id]);
+    if (hasLines) await writeInvoiceLines(client, ins.rows[0].id, computed.rows);
+    await client.query('COMMIT');
+    res.json({ ok: true, id: ins.rows[0].id });
   } catch (err) {
-    if (err.code === '23505') return res.status(400).json({ error: 'Pay app #' + (parseInt(a.applicationNumber) || 1) + ' already exists for this job' });
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.code === '23505') return res.status(400).json({ error: 'Pay app #' + appNo + ' already exists for this job' });
     serverError(res, err);
-  }
+  } finally { client.release(); }
 });
 app.put('/api/invoices/:invId', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   const a = req.body;
-  const held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null;
+  const appNo = parseInt(a.applicationNumber) || 1;
+  const hasLines = Array.isArray(a.lines) && a.lines.length > 0;
+  const client = await pool.connect();
   try {
-    const { rowCount } = await pool.query(
+    await client.query('BEGIN');
+    const inv = (await client.query('SELECT project_id FROM invoices WHERE id=$1', [req.params.invId])).rows[0];
+    if (!inv) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+    let workCompleted, held, computed = null;
+    if (hasLines) { computed = await computeInvoiceLines(client, inv.project_id, appNo, req.params.invId, a.lines); workCompleted = computed.workCompleted; held = computed.retainageHeld; }
+    else { workCompleted = money(a.workCompletedToDate) || 0; held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null; }
+    await client.query(
       `UPDATE invoices SET application_number=$1, period_end=$2, work_completed_to_date=$3, retainage_pct=$4, retainage_held=$5, status=$6, submitted_date=$7, approved_date=$8, notes=$9, amount_paid=$10, paid_date=$11 WHERE id=$12`,
-      [parseInt(a.applicationNumber) || 1, d(a.periodEnd), money(a.workCompletedToDate) || 0, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.approvedDate), d(a.notes), money(a.amountPaid), d(a.paidDate), req.params.invId]);
-    if (!rowCount) return res.status(404).json({ error: 'Not found' });
+      [appNo, d(a.periodEnd), workCompleted, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.approvedDate), d(a.notes), money(a.amountPaid), d(a.paidDate), req.params.invId]);
+    if (hasLines) await writeInvoiceLines(client, req.params.invId, computed.rows);
+    await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
-    if (err.code === '23505') return res.status(400).json({ error: 'Pay app #' + (parseInt(a.applicationNumber) || 1) + ' already exists for this job' });
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.code === '23505') return res.status(400).json({ error: 'Pay app #' + appNo + ' already exists for this job' });
     serverError(res, err);
-  }
+  } finally { client.release(); }
 });
 app.post('/api/invoices/:invId/payment', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   const p = req.body;
@@ -685,6 +819,90 @@ app.post('/api/projects/:id/release-retainage', requireFinancial, async (req, re
 app.delete('/api/invoices/:invId', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
   try { await pool.query('DELETE FROM invoices WHERE id = $1', [req.params.invId]); res.json({ ok: true }); }
   catch (err) { serverError(res, err); }
+});
+
+// ====== SCHEDULE OF VALUES (per project) ======
+const sovToClient = r => ({ id: r.id, itemNo: r.item_no || '', description: r.description || '', scheduledValue: Number(r.scheduled_value || 0), retainagePct: Number(r.retainage_pct || 0), sortOrder: r.sort_order });
+const sovList = async id => (await pool.query('SELECT * FROM sov_lines WHERE project_id=$1 ORDER BY sort_order NULLS LAST, item_no', [id])).rows.map(sovToClient);
+app.get('/api/projects/:id/sov', requireFinancial, async (req, res) => {
+  try { res.json(await sovList(req.params.id)); } catch (err) { serverError(res, err); }
+});
+// Manual "Sync schedule from bid" — re-pull and reconcile, preserving per-line
+// retainage overrides and existing pay-app progress.
+app.post('/api/projects/:id/sync-sov', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const proj = (await client.query('SELECT source_estimate_id FROM projects WHERE id=$1', [req.params.id])).rows[0];
+    if (!proj) return res.status(404).json({ error: 'Project not found' });
+    if (!proj.source_estimate_id) return res.status(400).json({ error: 'This job has no linked bid estimate to sync a schedule of values from.' });
+    if (!bidConfig()) return res.status(500).json({ error: 'Bid integration is not configured (BID_API_URL / TRACKER_KEY).' });
+    const r = await syncSovLines(client, req.params.id, proj.source_estimate_id);
+    res.json({ ok: true, count: r.count || 0, lines: await sovList(req.params.id) });
+  } catch (err) { console.error('[sync-sov]', err); res.status(502).json({ error: 'Could not sync from the bid tool: ' + err.message }); }
+  finally { client.release(); }
+});
+// Per-line retainage override (0 = a line that holds no retainage).
+app.put('/api/sov-lines/:lineId', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('UPDATE sov_lines SET retainage_pct=$1 WHERE id=$2', [money(req.body.retainagePct) || 0, req.params.lineId]);
+    if (!rowCount) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) { serverError(res, err); }
+});
+// The stored G703 detail for one pay app (used to seed the editor).
+app.get('/api/invoices/:invId/lines', requireFinancial, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY item_no', [req.params.invId]);
+    res.json(rows.map(r => ({ id: r.id, sovLineId: r.sov_line_id, itemNo: r.item_no || '', description: r.description || '', scheduledValue: Number(r.scheduled_value || 0), percentComplete: Number(r.percent_complete || 0), fromPrevious: Number(r.from_previous || 0), storedMaterials: Number(r.stored_materials || 0), retainagePct: Number(r.retainage_pct || 0) })));
+  } catch (err) { serverError(res, err); }
+});
+// Generate the G702 + G703 from Steve's workbook template, attach both to the
+// project as pay_app documents (replacing any previously generated pair).
+app.post('/api/invoices/:invId/generate', auth.requireRole('super_admin', 'admin', 'accounting'), async (req, res) => {
+  try {
+    const inv = (await pool.query('SELECT * FROM invoices WHERE id=$1', [req.params.invId])).rows[0];
+    if (!inv) return res.status(404).json({ error: 'Pay app not found' });
+    const proj = (await pool.query('SELECT * FROM projects WHERE id=$1', [inv.project_id])).rows[0];
+    const ilines = (await pool.query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY item_no', [req.params.invId])).rows;
+    if (!ilines.length) return res.status(400).json({ error: 'This pay app has no schedule-of-values lines yet. Sync the schedule from the bid and enter progress first.' });
+    const rowsCalc = invoiceRows((await pool.query('SELECT * FROM invoices WHERE project_id=$1', [inv.project_id])).rows);
+    const priors = rowsCalc.filter(r => r.applicationNumber < inv.application_number);
+    const prevCert = priors.length ? Number(priors[priors.length - 1].earnedLessRetainage) : 0;
+    const stdRet = Number(inv.retainage_pct || 10);
+    const cover = {
+      originalContractSum: Number(proj.original_contract || 0), stdRetPct: stdRet, storedRetPct: stdRet, previousCertificates: prevCert,
+      project: proj.name || '', ownerGc: proj.customer || '', contractor: process.env.COMPANY_NAME || 'R&R Fabrication',
+      appNo: inv.application_number, invoiceDate: inv.submitted_date || new Date().toISOString().slice(0, 10),
+      periodTo: inv.period_end || '', projectNo: proj.job_number || '', contractDate: proj.award_date || '',
+    };
+    const lines = ilines.map(l => ({ itemNo: l.item_no || '', description: l.description || '', scheduledValue: Number(l.scheduled_value || 0), fromPrevious: Number(l.from_previous || 0), storedMaterials: Number(l.stored_materials || 0), percentComplete: Number(l.percent_complete || 0), retainagePct: Number(l.retainage_pct || 0) }));
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    const templatePath = path.join(__dirname, 'templates', 'aia_g702_g703.xlsx');
+    const jobSlug = (proj.job_number || 'job').replace(/[^\w.-]+/g, '_');
+    const baseName = 'payapp_' + jobSlug + '_app' + inv.application_number + '_' + crypto.randomBytes(4).toString('hex');
+    let built;
+    try { built = await aia.buildPayAppFiles({ templatePath, outDir: UPLOAD_DIR, baseName, cover, lines }); }
+    catch (e) {
+      if (e.message === 'TEMPLATE_MISSING') return res.status(400).json({ error: 'The AIA workbook template is not in the repo yet. Add templates/aia_g702_g703.xlsx to the repo, then generate again.' });
+      throw e;
+    }
+    const old = (await pool.query("SELECT id, storage_key FROM documents WHERE invoice_id=$1 AND category IN ('pay_app_xlsx','pay_app_pdf')", [req.params.invId])).rows;
+    for (const o of old) { try { fs.unlinkSync(path.join(UPLOAD_DIR, o.storage_key)); } catch (_) {} await pool.query('DELETE FROM documents WHERE id=$1', [o.id]); }
+    const niceX = 'G702-G703_' + jobSlug + '_app' + inv.application_number + '.xlsx';
+    const xdoc = (await pool.query(
+      `INSERT INTO documents (project_id, invoice_id, file_name, file_type, file_size, storage_key, category, uploaded_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'pay_app_xlsx',$7) RETURNING *`,
+      [inv.project_id, req.params.invId, niceX, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fs.statSync(built.xlsxPath).size, path.basename(built.xlsxPath), req.user.id])).rows[0];
+    let pdoc = null;
+    if (built.pdfPath) {
+      const niceP = 'G702-G703_' + jobSlug + '_app' + inv.application_number + '.pdf';
+      pdoc = (await pool.query(
+        `INSERT INTO documents (project_id, invoice_id, file_name, file_type, file_size, storage_key, category, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,'pay_app_pdf',$7) RETURNING *`,
+        [inv.project_id, req.params.invId, niceP, 'application/pdf', fs.statSync(built.pdfPath).size, path.basename(built.pdfPath), req.user.id])).rows[0];
+    }
+    res.json({ ok: true, xlsx: docToClient(xdoc), pdf: pdoc ? docToClient(pdoc) : null, pdfError: built.pdfError || null });
+  } catch (err) { serverError(res, err); }
 });
 
 // ====== DOCUMENTS ======
@@ -919,7 +1137,7 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
       const jobNo = String(j.job_number || '').trim();
       if (!jobNo) continue;
       const newId = await createProjectFromWonJob(client, j, req.user.id);
-      if (newId) { imported.push(jobNo); newJobs.push({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount }); }
+      if (newId) { imported.push(jobNo); newJobs.push({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount, estimate_id: j.estimate_id }); }
       else { skipped.push(jobNo); }
     }
     await client.query('COMMIT');
@@ -930,7 +1148,7 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
   } finally {
     client.release();
   }
-  for (const nj of newJobs) notifyNewProject(nj).catch(e => console.error('[notify] failed:', e.message));
+  for (const nj of newJobs) { notifyNewProject(nj).catch(e => console.error('[notify] failed:', e.message)); kickoffSovSync(nj.id, nj.estimate_id); }
   res.json({ ok: true, importedCount: imported.length, skippedCount: skipped.length, imported, skipped });
 });
 
