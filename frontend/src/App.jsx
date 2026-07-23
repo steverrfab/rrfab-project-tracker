@@ -349,7 +349,7 @@ function ItemModal({ item, onClose }) {
 }
 
 function Detail({ id, user, onBack }) {
-  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [seqs, setSeqs] = useState([]); const [sov, setSov] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({});
+  const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [seqs, setSeqs] = useState([]); const [sov, setSov] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({}); const [syncing, setSyncing] = useState(false); const [genId, setGenId] = useState(null);
   const load = useCallback(async () => {
     const all = await api.get('/api/projects'); setP(all.find(x => x.id === id) || null);
     setHist(await api.get('/api/projects/' + id + '/stage-history'));
@@ -375,7 +375,6 @@ function Detail({ id, user, onBack }) {
   const payAppDoc = {}; docs.forEach(f => { if (f.category === 'pay_app' && f.invoiceId) payAppDoc[f.invoiceId] = f; });
   const genXlsx = {}, genPdf = {}; docs.forEach(f => { if (f.category === 'pay_app_xlsx' && f.invoiceId) genXlsx[f.invoiceId] = f; if (f.category === 'pay_app_pdf' && f.invoiceId) genPdf[f.invoiceId] = f; });
   const coDoc = {}; docs.forEach(f => { if (f.category === 'co' && f.changeOrderId) coDoc[f.changeOrderId] = f; });
-  const [syncing, setSyncing] = useState(false); const [genId, setGenId] = useState(null);
   const syncSov = async () => {
     setSyncing(true);
     try { const j = await api.send('POST', '/api/projects/' + p.id + '/sync-sov'); await load(); alert('Synced ' + (j.count || 0) + ' schedule-of-values line(s) from the bid.'); }
