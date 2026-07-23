@@ -626,7 +626,7 @@ function invoiceRows(rows) {
       earnedLessRetainage: elr, currentPaymentDue: due,
       amountPaid: a.amount_paid, status: a.status,
       submittedDate: a.submitted_date || '', approvedDate: a.approved_date || '', paidDate: a.paid_date || '',
-      notes: a.notes || '', isRetainageRelease: !!a.is_retainage_release,
+      notes: a.notes || '', isRetainageRelease: !!a.is_retainage_release, isFinal: !!a.is_final,
     };
   });
 }
@@ -740,9 +740,9 @@ app.post('/api/projects/:id/invoices', auth.requireRole('super_admin', 'admin', 
     if (hasLines) { computed = await computeInvoiceLines(client, req.params.id, appNo, null, a.lines); workCompleted = computed.workCompleted; held = computed.retainageHeld; }
     else { workCompleted = money(a.workCompletedToDate) || 0; held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null; }
     const ins = await client.query(
-      `INSERT INTO invoices (project_id, application_number, period_end, work_completed_to_date, retainage_pct, retainage_held, status, submitted_date, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-      [req.params.id, appNo, d(a.periodEnd), workCompleted, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.notes), req.user.id]);
+      `INSERT INTO invoices (project_id, application_number, period_end, work_completed_to_date, retainage_pct, retainage_held, status, submitted_date, notes, created_by, is_final)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [req.params.id, appNo, d(a.periodEnd), workCompleted, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.notes), req.user.id, !!a.isFinal]);
     if (hasLines) await writeInvoiceLines(client, ins.rows[0].id, computed.rows);
     await client.query('COMMIT');
     res.json({ ok: true, id: ins.rows[0].id });
@@ -765,8 +765,8 @@ app.put('/api/invoices/:invId', auth.requireRole('super_admin', 'admin', 'accoun
     if (hasLines) { computed = await computeInvoiceLines(client, inv.project_id, appNo, req.params.invId, a.lines); workCompleted = computed.workCompleted; held = computed.retainageHeld; }
     else { workCompleted = money(a.workCompletedToDate) || 0; held = (a.retainageHeld != null && a.retainageHeld !== '') ? money(a.retainageHeld) : null; }
     await client.query(
-      `UPDATE invoices SET application_number=$1, period_end=$2, work_completed_to_date=$3, retainage_pct=$4, retainage_held=$5, status=$6, submitted_date=$7, approved_date=$8, notes=$9, amount_paid=$10, paid_date=$11 WHERE id=$12`,
-      [appNo, d(a.periodEnd), workCompleted, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.approvedDate), d(a.notes), money(a.amountPaid), d(a.paidDate), req.params.invId]);
+      `UPDATE invoices SET application_number=$1, period_end=$2, work_completed_to_date=$3, retainage_pct=$4, retainage_held=$5, status=$6, submitted_date=$7, approved_date=$8, notes=$9, amount_paid=$10, paid_date=$11, is_final=$12 WHERE id=$13`,
+      [appNo, d(a.periodEnd), workCompleted, money(a.retainagePct) || 10, held, a.status || 'Draft', d(a.submittedDate), d(a.approvedDate), d(a.notes), money(a.amountPaid), d(a.paidDate), !!a.isFinal, req.params.invId]);
     if (hasLines) await writeInvoiceLines(client, req.params.invId, computed.rows);
     await client.query('COMMIT');
     res.json({ ok: true });
@@ -873,6 +873,7 @@ app.post('/api/invoices/:invId/generate', auth.requireRole('super_admin', 'admin
       project: proj.name || '', ownerGc: proj.customer || '', contractor: process.env.COMPANY_NAME || 'R&R Fabrication',
       appNo: inv.application_number, invoiceDate: inv.submitted_date || new Date().toISOString().slice(0, 10),
       periodTo: inv.period_end || '', projectNo: proj.job_number || '', contractDate: proj.award_date || '',
+      finalApp: !!(inv.is_final || inv.is_retainage_release),
     };
     let lines;
     if (ilines.length) {
