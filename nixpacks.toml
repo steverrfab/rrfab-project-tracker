@@ -1,5 +1,0 @@
-# Railway/Nixpacks build config. LibreOffice is used server-side to render the
-# filled AIA G702/G703 workbook to PDF (see aiaExport.js). Without it the Excel
-# still generates and the PDF step is skipped gracefully.
-[phases.setup]
-aptPkgs = ["libreoffice-calc", "fonts-liberation"]
