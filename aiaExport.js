@@ -180,19 +180,11 @@ async function buildPayAppFiles({ templatePath, outDir, baseName, cover, lines }
   await wb.xlsx.writeFile(xlsxPath);
 
   // ---- PDF via LibreOffice (failures swallowed into pdfError) --------------
-  let pdfPath = null;
-  let pdfError = null;
-  try {
-    const result = await convertToPdf(xlsxPath, outDir, baseName);
-    pdfPath = result.pdfPath;
-    pdfError = result.pdfError;
-  } catch (err) {
-    // Belt-and-suspenders: never let a LibreOffice problem propagate.
-    pdfPath = null;
-    pdfError = err && err.message ? err.message : String(err);
-  }
-
-  return { xlsxPath, pdfPath, pdfError };
+  // PDF generation is intentionally off: we produce the .xlsx only and whoever
+  // downloads it can Save As PDF. This keeps deploys fast (no LibreOffice in the
+  // build). We still return the { xlsxPath, pdfPath, pdfError } shape so the
+  // caller (and the pay-app documents logic) is unchanged.
+  return { xlsxPath, pdfPath: null, pdfError: null };
 }
 
 module.exports = { buildPayAppFiles };
