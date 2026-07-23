@@ -38,6 +38,17 @@ const PCT = '0.0%';
 const num = v => { const n = Number(v); return isNaN(n) ? 0 : n; };
 const r2 = n => Math.round(n * 100) / 100;
 
+// Dates come in as 'YYYY-MM-DD' (or an ISO datetime / Date). Print them the way
+// a US GC expects to read them on the pay app: MM/DD/YYYY. Anything we can't
+// parse is passed through untouched so we never blank out a real value.
+function fmtDate(v) {
+  if (!v) return '';
+  const s = (v instanceof Date) ? v.toISOString().slice(0, 10)
+          : (typeof v === 'string' ? v.slice(0, 10) : String(v));
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : String(v);
+}
+
 function money(cell) { cell.numFmt = MONEY; cell.alignment = { horizontal: 'right' }; }
 function thinBox(cell) {
   cell.border = {
@@ -68,10 +79,16 @@ function buildG702(ws, cover, totals) {
 
   const rlabel = (addr, text) => { const c = ws.getCell(addr); c.value = text; c.font = { bold: true, size: 9 }; c.alignment = { horizontal: 'right' }; };
   rlabel('J3', 'APPLICATION NO:'); ws.getCell('K3').value = cover.appNo != null ? cover.appNo : '';
-  rlabel('J4', 'APPLICATION DATE:'); ws.getCell('K4').value = cover.invoiceDate || '';
-  rlabel('J5', 'PERIOD TO:'); ws.getCell('K5').value = cover.periodTo || '';
+  rlabel('J4', 'APPLICATION DATE:'); ws.getCell('K4').value = fmtDate(cover.invoiceDate);
+  rlabel('J5', 'PERIOD TO:'); ws.getCell('K5').value = fmtDate(cover.periodTo);
   rlabel('J8', 'PROJECT NO:'); ws.getCell('K8').value = cover.projectNo || '';
-  rlabel('J10', 'CONTRACT DATE:'); ws.getCell('K10').value = cover.contractDate || '';
+  rlabel('J10', 'CONTRACT DATE:'); ws.getCell('K10').value = fmtDate(cover.contractDate);
+
+  // Final application banner (retainage-release app, or one flagged Final).
+  if (cover.finalApp) {
+    const fc = ws.getCell('A12'); fc.value = 'FINAL APPLICATION';
+    fc.font = { bold: true, size: 12, color: { argb: 'FFB00020' } };
+  }
 
   const line = (row, text, bold) => { const c = ws.getCell('A' + row); c.value = text; c.font = { bold: !!bold, size: 10 }; };
   const dollar = (addr, val, bold) => { const c = ws.getCell(addr); c.value = r2(val); money(c); if (bold) c.font = { bold: true }; };
