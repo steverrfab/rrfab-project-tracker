@@ -864,7 +864,6 @@ app.post('/api/invoices/:invId/generate', auth.requireRole('super_admin', 'admin
     if (!inv) return res.status(404).json({ error: 'Pay app not found' });
     const proj = (await pool.query('SELECT * FROM projects WHERE id=$1', [inv.project_id])).rows[0];
     const ilines = (await pool.query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY item_no', [req.params.invId])).rows;
-    if (!ilines.length) return res.status(400).json({ error: 'This pay app has no schedule-of-values lines yet. Sync the schedule from the bid and enter progress first.' });
     const rowsCalc = invoiceRows((await pool.query('SELECT * FROM invoices WHERE project_id=$1', [inv.project_id])).rows);
     const priors = rowsCalc.filter(r => r.applicationNumber < inv.application_number);
     const prevCert = priors.length ? Number(priors[priors.length - 1].earnedLessRetainage) : 0;
@@ -875,7 +874,21 @@ app.post('/api/invoices/:invId/generate', auth.requireRole('super_admin', 'admin
       appNo: inv.application_number, invoiceDate: inv.submitted_date || new Date().toISOString().slice(0, 10),
       periodTo: inv.period_end || '', projectNo: proj.job_number || '', contractDate: proj.award_date || '',
     };
-    const lines = ilines.map(l => ({ itemNo: l.item_no || '', description: l.description || '', scheduledValue: Number(l.scheduled_value || 0), fromPrevious: Number(l.from_previous || 0), storedMaterials: Number(l.stored_materials || 0), percentComplete: Number(l.percent_complete || 0), retainagePct: Number(l.retainage_pct || 0) }));
+    let lines;
+    if (ilines.length) {
+      lines = ilines.map(l => ({ itemNo: l.item_no || '', description: l.description || '', scheduledValue: Number(l.scheduled_value || 0), fromPrevious: Number(l.from_previous || 0), storedMaterials: Number(l.stored_materials || 0), percentComplete: Number(l.percent_complete || 0), retainagePct: Number(l.retainage_pct || 0) }));
+    } else {
+      // Single-number pay app (no schedule of values): synthesize a one-line G703
+      // from the lump-sum completed-to-date so the AIA form still generates. The
+      // line foots to the same completed / retainage / balance the invoice shows.
+      const completed = Number(inv.work_completed_to_date || 0);
+      const sched = Number(proj.original_contract || 0) > 0 ? Number(proj.original_contract) : completed;
+      const pct = sched > 0 ? (completed / sched * 100) : 0;
+      const priorCompleted = priors.length ? Number(priors[priors.length - 1].workCompletedToDate || 0) : 0;
+      const held = inv.retainage_held != null ? Number(inv.retainage_held) : null;
+      const retPct = (held != null && completed > 0) ? (held / completed * 100) : stdRet;
+      lines = [{ itemNo: '1', description: proj.name || 'Contract work', scheduledValue: sched, fromPrevious: priorCompleted, storedMaterials: 0, percentComplete: pct, retainagePct: retPct }];
+    }
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     const templatePath = path.join(__dirname, 'templates', 'aia_g702_g703.xlsx');
     const jobSlug = (proj.job_number || 'job').replace(/[^\w.-]+/g, '_');
