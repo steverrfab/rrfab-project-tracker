@@ -16,10 +16,27 @@ const FINANCIAL_ROLES = ['super_admin', 'admin', 'accounting', 'pm'];
 const requireFinancial = auth.requireRole(...FINANCIAL_ROLES);
 
 // Allowed values for server-side validation (mirrors the frontend lists).
-const PROJECT_STATUSES = ['Awarded', 'Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping', 'Field/Erection', 'Completed', 'On Hold'];
+const PROJECT_STATUSES = ['Awarded', 'Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping to Site', 'Field/Erection', 'Completed', 'On Hold'];
 const DRAWING_STATUSES = ['N/A', 'Not Started', 'In Progress', 'Approved', 'Revision Needed'];
-const SEQUENCE_STATUSES = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped', 'Erected'];
-const ACTIVE_STAGES = ['Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping', 'Field/Erection'];
+const SEQUENCE_STATUSES = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped to Site', 'Erected'];
+const ACTIVE_STAGES = ['Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping to Site', 'Field/Erection'];
+
+// Email notifications people can subscribe to, stored per user in
+// users.notification_prefs. A missing key means off, so nobody is ever
+// signed up for something without choosing it.
+const NOTIFICATION_EVENTS = [
+  { key: 'new_job', label: 'New job added', help: 'A won bid lands in the tracker as a new Awarded job.' },
+  { key: 'status_change', label: 'Any stage change', help: 'Every time a job moves to a different stage.' },
+  { key: 'job_completed', label: 'Job completed', help: 'A job reaches Completed. Skipped if you already get every stage change.' },
+  { key: 'job_on_hold', label: 'Job put on hold', help: 'A job moves to On Hold. Skipped if you already get every stage change.' },
+];
+const NOTIFICATION_KEYS = NOTIFICATION_EVENTS.map(e => e.key);
+// Keep only known keys and coerce to real booleans so the stored blob stays clean.
+function cleanPrefs(raw) {
+  const out = {};
+  if (raw && typeof raw === 'object') for (const k of NOTIFICATION_KEYS) if (k in raw) out[k] = !!raw[k];
+  return out;
+}
 
 // Never send raw error details to the client; log them here instead.
 function serverError(res, err) {
@@ -313,7 +330,7 @@ app.get('/sso', async (req, res) => {
 app.use('/api', auth.requireAuth);
 
 // ====== USERS (admins) ======
-const userToClient = u => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: u.is_active });
+const userToClient = u => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: u.is_active, notificationPrefs: u.notification_prefs || {} });
 app.get('/api/users', auth.requireRole('super_admin', 'admin'), async (req, res) => {
   try { const { rows } = await pool.query('SELECT * FROM users ORDER BY created_at'); res.json(rows.map(userToClient)); }
   catch (err) { serverError(res, err); }
@@ -334,15 +351,30 @@ app.put('/api/users/:id', auth.requireRole('super_admin', 'admin'), async (req, 
     const target = (await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id])).rows[0];
     if (!target) return res.status(404).json({ error: 'Not found' });
     if (target.role === 'super_admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only the Super Admin can change that account' });
-    const { name, role, active, password } = req.body;
+    const { name, role, active, password, notificationPrefs } = req.body;
     const newRole = target.role === 'super_admin' ? 'super_admin' : (['admin', 'accounting', 'pm', 'shop'].includes(role) ? role : target.role);
+    const prefs = notificationPrefs === undefined ? null : JSON.stringify(cleanPrefs(notificationPrefs));
     await pool.query(
-      'UPDATE users SET name = COALESCE($1, name), role = $2, is_active = $3, password_hash = COALESCE($4, password_hash) WHERE id = $5',
-      [name || null, newRole, active != null ? !!active : target.is_active, password ? auth.hashPassword(password) : null, req.params.id]);
+      'UPDATE users SET name = COALESCE($1, name), role = $2, is_active = $3, password_hash = COALESCE($4, password_hash), notification_prefs = COALESCE($5::jsonb, notification_prefs) WHERE id = $6',
+      [name || null, newRole, active != null ? !!active : target.is_active, password ? auth.hashPassword(password) : null, prefs, req.params.id]);
     res.json({ ok: true });
   } catch (err) { serverError(res, err); }
 });
 
+// ====== MY NOTIFICATIONS (any signed-in user manages their own) ======
+app.get('/api/notification-prefs', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT notification_prefs FROM users WHERE id = $1', [req.user.id]);
+    res.json({ events: NOTIFICATION_EVENTS, prefs: (rows[0] && rows[0].notification_prefs) || {} });
+  } catch (err) { serverError(res, err); }
+});
+app.put('/api/notification-prefs', async (req, res) => {
+  try {
+    const prefs = cleanPrefs(req.body && req.body.prefs);
+    await pool.query('UPDATE users SET notification_prefs = $1::jsonb WHERE id = $2', [JSON.stringify(prefs), req.user.id]);
+    res.json({ ok: true, prefs });
+  } catch (err) { serverError(res, err); }
+});
 
 // helpers
 const d = v => (v === undefined || v === null || v === '') ? null : v;
@@ -514,13 +546,22 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
     if (p.status === 'Completed') await client.query('UPDATE projects SET completed_date = COALESCE(completed_date, CURRENT_DATE) WHERE id = $1', [id]);
     // A job is "set up" once its projected start date is filled in; clear the flag.
     await client.query('UPDATE projects SET needs_setup = false WHERE id = $1 AND projected_start_date IS NOT NULL', [id]);
-    if (prev.rows[0].status !== p.status) {
+    const statusMoved = prev.rows[0].status !== p.status;
+    if (statusMoved) {
       await client.query(
         'INSERT INTO stage_history (project_id, status, changed_by) VALUES ($1, $2, $3)',
         [id, p.status, req.user.id]
       );
     }
     await client.query('COMMIT');
+    // Fire and forget after the commit so a mail problem can never roll back
+    // or slow down the save.
+    if (statusMoved) {
+      notifyStatusChange(
+        { job_number: p.jobNumber, name: p.name, customer: p.customer },
+        prev.rows[0].status, p.status, req.user.name
+      ).catch(e => console.error('[notify] failed:', e.message));
+    }
     res.json({ ok: true });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -965,7 +1006,9 @@ app.get('/api/billing', requireFinancial, async (req, res) => {
     const invByProj = {}, coByProj = {};
     for (const i of inv) (invByProj[i.project_id] = invByProj[i.project_id] || []).push(i);
     for (const c of cos) (coByProj[c.project_id] = coByProj[c.project_id] || []).push(c);
-    const ACTIVE_FAB = ['In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping', 'Field/Erection'];
+    // Jobs whose contract can run ahead of billing. Completed is included on
+    // purpose: finishing the steel does not mean the job is fully billed.
+    const ACTIVE_FAB = ['In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping to Site', 'Field/Erection', 'Completed'];
     let billedToDate = 0, collected = 0, retainageHeld = 0;
     const open = [], paidHist = [], needsBilling = [], retainageOutstanding = [], margin = [];
     for (const p of proj) {
@@ -1035,7 +1078,7 @@ app.post('/api/projects/:id/notes', async (req, res) => {
 });
 
 // ====== SEQUENCES (per-job, each with its own milestone dates) ======
-const SEQ_DONE = st => st === 'Shipped' || st === 'Erected';
+const SEQ_DONE = st => st === 'Shipped to Site' || st === 'Erected';
 const seqToClient = q => ({ id: q.id, description: q.description || '', status: q.status || 'Not started', done: !!q.done, fabDate: q.fab_date || '', galvOut: q.galv_out_date || '', galvBack: q.galv_back_date || '', paintDate: q.paint_date || '', shipDate: q.ship_date || '', erectDate: q.erect_date || '', sortOrder: q.sort_order });
 app.get('/api/projects/:id/sequences', async (req, res) => {
   try { const { rows } = await pool.query('SELECT * FROM deliveries WHERE project_id = $1 ORDER BY sort_order NULLS LAST, ship_date NULLS LAST', [req.params.id]); res.json(rows.map(seqToClient)); }
@@ -1072,13 +1115,21 @@ app.delete('/api/sequences/:seqId', auth.requireRole('super_admin', 'admin', 'pm
 // Defensive by design: if email is not configured, the recipient table is not
 // there yet, or nobody is on the list, it simply does nothing. It never throws
 // into the caller, so a mail problem can never block creating a project.
+// Active users who opted in to at least one of the given events. Returns [] on
+// any problem so a mail lookup can never break the request that triggered it.
+async function subscribers(keys) {
+  try {
+    const conds = keys.map((_, i) => "(notification_prefs->>$" + (i + 1) + ")::boolean IS TRUE").join(' OR ');
+    const { rows } = await pool.query(
+      'SELECT email, name FROM users WHERE is_active = true AND (' + conds + ')', keys);
+    return rows;
+  } catch (e) { console.error('[notify] recipient lookup failed:', e.message); return []; }
+}
+
 async function notifyNewProject(p) {
   try {
     if (!mailer.isConfigured()) return;
-    let recips = [];
-    try {
-      recips = (await pool.query('SELECT email, name FROM tracker_notification_recipients WHERE active = true')).rows;
-    } catch (_) { return; } // table not created yet
+    const recips = await subscribers(['new_job']);
     if (!recips.length) return;
     const amt = money(p.contract_amount);
     const contract = amt == null ? '' : ('USD ' + amt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
@@ -1106,6 +1157,50 @@ async function notifyNewProject(p) {
     }
   } catch (e) {
     console.error('[notify] error:', e.message);
+  }
+}
+
+// Email people who follow stage moves. Anyone on 'status_change' gets every
+// move; the Completed and On Hold events exist for people who only care about
+// those two, and a subscriber to both is only ever emailed once.
+async function notifyStatusChange(p, fromStatus, toStatus, changedByName) {
+  try {
+    if (!mailer.isConfigured()) return;
+    const keys = ['status_change'];
+    if (toStatus === 'Completed') keys.push('job_completed');
+    if (toStatus === 'On Hold') keys.push('job_on_hold');
+    const recips = await subscribers(keys);
+    if (!recips.length) return;
+    const seen = new Set();
+    const base = (process.env.PUBLIC_URL || '').replace(/[\/]+$/, '');
+    const link = base ? (base + '/') : '';
+    const jobLabel = (p.job_number ? ('#' + p.job_number + ' ') : '') + (p.name || '');
+    const subject = jobLabel.trim() + ' is now ' + toStatus;
+    const rows = [
+      ['Job number', p.job_number || ''],
+      ['Project', p.name || ''],
+      ['Customer', p.customer || ''],
+      ['Was', fromStatus || ''],
+      ['Now', toStatus],
+      ['Changed by', changedByName || ''],
+    ].filter(r => r[1] !== '' && r[1] != null)
+      .map(r => '<tr><td style="padding:4px 12px 4px 0;color:#6b7889">' + r[0] + '</td><td style="padding:4px 0;font-weight:600">' + escapeHtml(r[1]) + '</td></tr>').join('');
+    const html = '<p><b>' + escapeHtml(jobLabel.trim()) + '</b> moved from <b>' + escapeHtml(fromStatus || '') + '</b> to <b>' + escapeHtml(toStatus) + '</b>.</p>' +
+      '<table style="border-collapse:collapse;font-size:14px">' + rows + '</table>' +
+      (link ? ('<p style="margin-top:16px"><a href="' + link + '">Open the tracker</a></p>') : '') +
+      '<p style="margin-top:16px;color:#6b7889;font-size:12px">You are getting this because of your notification settings in the tracker.</p>';
+    const text = jobLabel.trim() + ' moved from ' + (fromStatus || '') + ' to ' + toStatus + '.' +
+      (p.customer ? ('\nCustomer: ' + p.customer) : '') +
+      (changedByName ? ('\nChanged by: ' + changedByName) : '') +
+      (link ? ('\n\nOpen the tracker: ' + link) : '');
+    for (const r of recips) {
+      if (seen.has(r.email)) continue;
+      seen.add(r.email);
+      try { await mailer.sendMail({ to: r.email, subject, html, text }); }
+      catch (e) { console.error('[notify] send to ' + r.email + ' failed:', e.message); }
+    }
+  } catch (e) {
+    console.error('[notify] status change error:', e.message);
   }
 }
 
@@ -1166,48 +1261,11 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
   res.json({ ok: true, importedCount: imported.length, skippedCount: skipped.length, imported, skipped });
 });
 
-// ====== NOTIFICATION RECIPIENTS (admin only) ======
-// The people emailed when a new job lands in the tracker. Managed in-app so
-// admins can change the list without a code change.
-app.get('/api/notification-recipients', auth.requireRole('super_admin', 'admin'), async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT id, email, name, active, created_at FROM tracker_notification_recipients ORDER BY created_at ASC');
-    res.json(rows);
-  } catch (err) { serverError(res, err); }
-});
-app.post('/api/notification-recipients', auth.requireRole('super_admin', 'admin'), async (req, res) => {
-  const email = String((req.body || {}).email || '').trim().toLowerCase();
-  const name = String((req.body || {}).name || '').trim();
-  const active = (req.body || {}).active === false ? false : true;
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'A valid email is required.' });
-  try {
-    const { rows } = await pool.query(
-      'INSERT INTO tracker_notification_recipients (email, name, active) VALUES ($1,$2,$3) ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, active = EXCLUDED.active RETURNING id, email, name, active, created_at',
-      [email, name, active]);
-    res.status(201).json(rows[0]);
-  } catch (err) { serverError(res, err); }
-});
-app.put('/api/notification-recipients/:id', auth.requireRole('super_admin', 'admin'), async (req, res) => {
-  const b = req.body || {};
-  const sets = [], vals = [];
-  if (b.email != null) { const e = String(b.email).trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return res.status(400).json({ error: 'Invalid email.' }); sets.push('email = $' + (vals.push(e))); }
-  if (b.name != null) { sets.push('name = $' + (vals.push(String(b.name).trim()))); }
-  if (b.active != null) { sets.push('active = $' + (vals.push(!!b.active))); }
-  if (!sets.length) return res.status(400).json({ error: 'Nothing to update.' });
-  vals.push(req.params.id);
-  try {
-    const { rows } = await pool.query('UPDATE tracker_notification_recipients SET ' + sets.join(', ') + ' WHERE id = $' + vals.length + ' RETURNING id, email, name, active, created_at', vals);
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json(rows[0]);
-  } catch (err) { serverError(res, err); }
-});
-app.delete('/api/notification-recipients/:id', auth.requireRole('super_admin', 'admin'), async (req, res) => {
-  try {
-    const r = await pool.query('DELETE FROM tracker_notification_recipients WHERE id = $1', [req.params.id]);
-    if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
-    res.json({ ok: true });
-  } catch (err) { serverError(res, err); }
-});
+// The old standalone new-job recipient list was retired in favour of per-user
+// notification preferences (see /api/notification-prefs and the users API).
+// The tracker_notification_recipients table is left in place untouched so the
+// one-time migration that copied those addresses onto user accounts stays
+// repeatable and nothing is lost.
 
 // ====== ADMIN "IMPORT WON JOBS" PAGE (Step 4) ======
 // Lightweight standalone page so the import is one click. Visit /admin/import
@@ -1234,48 +1292,6 @@ app.get('/admin/import', (req, res) => {
     'if(!r.ok){out.textContent=(r.status===401?"Please log in as an admin first, then reload this page.":(r.status===403?"You need an admin account to import.":("Error: "+(j.error||r.status))));b.disabled=false;return;}' +
     'out.textContent="Imported "+j.importedCount+" job(s)"+(j.imported.length?": "+j.imported.join(", "):"")+".\\nSkipped "+j.skippedCount+" already in the tracker"+(j.skipped.length?": "+j.skipped.join(", "):"")+".";' +
     'b.disabled=false;}catch(e){out.textContent="Could not reach the server: "+e.message;b.disabled=false;}};' +
-    '</script></div></body></html>'
-  );
-});
-
-// ====== ADMIN "NOTIFICATION RECIPIENTS" PAGE ======
-// Simple in-app screen for admins to manage who gets the new-job email.
-// Visit /admin/notifications while logged in as an admin.
-app.get('/admin/notifications', (req, res) => {
-  res.type('html').send(
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<title>New-job email recipients - R&R Project Tracker</title>' +
-    '<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f4f6f9;color:#1c2430;margin:0;padding:40px;display:flex;justify-content:center}' +
-    '.card{background:#fff;border:1px solid #e2e7ee;border-radius:14px;padding:28px;max-width:620px;width:100%}' +
-    'h1{font-size:20px;margin:0 0 4px}p.sub{color:#6b7889;font-size:13px;margin:0 0 20px}' +
-    'input{padding:10px;border:1px solid #cbd3de;border-radius:8px;font-size:14px}' +
-    '.row{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}.row input.email{flex:2;min-width:200px}.row input.name{flex:1;min-width:140px}' +
-    'button{background:#d98521;color:#3a2400;border:0;border-radius:9px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer}' +
-    'button.link{background:none;color:#b23b3b;font-weight:600;padding:4px 8px}button.toggle{background:#eef1f5;color:#3a4656;font-weight:600;padding:4px 10px}' +
-    'table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}td,th{text-align:left;padding:8px 6px;border-bottom:1px solid #eef1f5}' +
-    'th{color:#6b7889;font-weight:600;font-size:12px}.muted{color:#93a0b0}.err{color:#b23b3b;font-size:13px;margin-top:10px}a{color:#2f6fb0}</style></head><body><div class="card">' +
-    '<h1>New-job email recipients</h1>' +
-    '<p class="sub">These people are emailed automatically whenever a new job is created in the tracker from a won bid. Inactive recipients stay on the list but are skipped.</p>' +
-    '<div class="row"><input class="email" id="email" type="email" placeholder="email@rrfab.com"><input class="name" id="name" type="text" placeholder="Name (optional)"><button id="add">Add</button></div>' +
-    '<div id="err" class="err"></div>' +
-    '<table><thead><tr><th>Email</th><th>Name</th><th>Status</th><th></th></tr></thead><tbody id="list"><tr><td colspan="4" class="muted">Loading...</td></tr></tbody></table>' +
-    '<p style="margin-top:22px"><a href="/">Back to the tracker</a></p>' +
-    '<script>' +
-    'var listEl=document.getElementById("list"),errEl=document.getElementById("err");' +
-    'function esc(t){var d=document.createElement("div");d.textContent=(t==null?"":String(t));return d.innerHTML;}' +
-    'function api(method,path,body){return fetch(path,{method:method,headers:{"Content-Type":"application/json"},credentials:"same-origin",body:body?JSON.stringify(body):undefined});}' +
-    'function show(msg){errEl.textContent=msg||"";}' +
-    'function load(){api("GET","/api/notification-recipients").then(function(r){if(r.status===401){listEl.innerHTML=\'<tr><td colspan=4>Please log in as an admin, then reload.</td></tr>\';return null;}if(r.status===403){listEl.innerHTML=\'<tr><td colspan=4>You need an admin account.</td></tr>\';return null;}return r.json();}).then(function(rows){if(!rows)return;render(rows);}).catch(function(e){show("Could not load: "+e.message);});}' +
-    'function render(rows){if(!rows.length){listEl.innerHTML=\'<tr><td colspan=4 class=muted>No recipients yet. Add one above.</td></tr>\';return;}listEl.innerHTML=rows.map(function(x){' +
-    'var status=x.active?"Active":"<span class=muted>Inactive</span>";' +
-    'return "<tr data-id="+x.id+"><td>"+esc(x.email)+"</td><td>"+esc(x.name)+"</td><td>"+status+"</td>"+' +
-    '"<td style=text-align:right><button class=toggle data-act="+(x.active?"off":"on")+">"+(x.active?"Deactivate":"Activate")+"</button> <button class=link data-del=1>Remove</button></td></tr>";}).join("");}' +
-    'document.getElementById("add").onclick=function(){show("");var email=document.getElementById("email").value.trim();var name=document.getElementById("name").value.trim();if(!email){show("Enter an email.");return;}' +
-    'api("POST","/api/notification-recipients",{email:email,name:name}).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}).then(function(o){if(!o.ok){show(o.j.error||"Could not add.");return;}document.getElementById("email").value="";document.getElementById("name").value="";load();}).catch(function(e){show(e.message);});};' +
-    'listEl.onclick=function(ev){var tr=ev.target.closest("tr[data-id]");if(!tr)return;var id=tr.getAttribute("data-id");' +
-    'if(ev.target.hasAttribute("data-del")){if(!confirm("Remove this recipient?"))return;api("DELETE","/api/notification-recipients/"+id).then(function(){load();});}' +
-    'else if(ev.target.classList.contains("toggle")){var act=ev.target.getAttribute("data-act")==="on";api("PUT","/api/notification-recipients/"+id,{active:act}).then(function(){load();});}};' +
-    'load();' +
     '</script></div></body></html>'
   );
 });

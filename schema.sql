@@ -28,6 +28,8 @@ CREATE TABLE users (
     role          text        NOT NULL
                   CHECK (role IN ('super_admin','admin','accounting','pm','shop')),
     is_active     boolean     NOT NULL DEFAULT true,
+    -- Per-user email notification prefs, keyed by event name. Missing = off.
+    notification_prefs jsonb  NOT NULL DEFAULT '{}'::jsonb,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
@@ -52,7 +54,7 @@ CREATE TABLE projects (
                         CHECK (status IN (
                             'Bidding','Submitted','Awarded','Purchasing',
                             'In Fabrication','Ready for Galvanizing/Paint',
-                            'In Galvanizing','In Paint','Shipping',
+                            'In Galvanizing','In Paint','Shipping to Site',
                             'Field/Erection','Completed','Lost/On Hold')),
     drawing_status      text        NOT NULL DEFAULT 'N/A'
                         CHECK (drawing_status IN (
