@@ -541,9 +541,15 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
 
   const [a, setA] = useState(editing
     ? { applicationNumber: existing.applicationNumber, periodEnd: existing.periodEnd || '', workCompletedToDate: existing.workCompletedToDate, retainagePct: existing.retainagePct, status: existing.status, submittedDate: existing.submittedDate || '', approvedDate: existing.approvedDate || '', notes: existing.notes || '', amountPaid: existing.amountPaid || '', paidDate: existing.paidDate || '', isFinal: !!existing.isFinal }
-    : { applicationNumber: appNo, periodEnd: '', workCompletedToDate: '', retainagePct: 10, status: 'Draft', isFinal: false });
+    : { applicationNumber: appNo, periodEnd: '', workCompletedToDate: '', retainagePct: prevApp ? Number(prevApp.retainagePct) : 10, status: 'Draft', isFinal: false });
   const set = k => e => setA({ ...a, [k]: e.target.value });
-  const [lines, setLines] = useState([]); const [stdRet, setStdRet] = useState('10'); const [seeding, setSeeding] = useState(useLines);
+  // Standard retainage starts from this app if we're editing one, otherwise from
+  // the previous app on the job, so a no-retainage job stays at 0 instead of
+  // snapping back to 10% every time. fromNum() shows a real 0 as a blank box
+  // with a 0 placeholder, and num('') reads it back as 0.
+  const [lines, setLines] = useState([]);
+  const [stdRet, setStdRet] = useState(fromNum(editing ? existing.retainagePct : (prevApp ? prevApp.retainagePct : 10)));
+  const [seeding, setSeeding] = useState(useLines);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
   const keySeq = useRef(0); const mkKey = () => 'k' + (keySeq.current++);
 
