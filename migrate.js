@@ -157,6 +157,30 @@ async function runExtraMigrations() {
       stored_materials numeric(14,2) NOT NULL DEFAULT 0,
       retainage_pct numeric(5,2) NOT NULL DEFAULT 10)`);
     await client.query('CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines (invoice_id)');
+    // Shipping -> Shipping to Site. The old name never said where the load was
+    // going; galvanizer and painter trips are already covered by their own
+    // stages, so the only unnamed move is shop/paint -> job site.
+    await client.query("UPDATE projects SET status = 'Shipping to Site' WHERE status = 'Shipping'");
+    await client.query("UPDATE stage_history SET status = 'Shipping to Site' WHERE status = 'Shipping'");
+    await client.query("UPDATE deliveries SET status = 'Shipped to Site' WHERE status = 'Shipped'");
+    // Per-user email notification preferences. One JSON blob per user keyed by
+    // event name; a missing key means "off", so nobody is opted in by accident.
+    await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_prefs jsonb NOT NULL DEFAULT '{}'::jsonb");
+    // Carry the old standalone new-job list over to the matching user accounts
+    // so today's behaviour survives the switch. Runs once: the guard skips
+    // anyone who already has the new_job key set.
+    try {
+      await client.query(`UPDATE users u SET notification_prefs = u.notification_prefs || '{"new_job": true}'::jsonb
+        FROM tracker_notification_recipients r
+        WHERE lower(r.email) = lower(u.email) AND r.active = true
+          AND NOT (u.notification_prefs ? 'new_job')`);
+      // Anyone on the old list without a tracker login cannot be carried over,
+      // since prefs now live on the user record. Name them in the deploy log so
+      // they are not silently dropped.
+      const orphans = await client.query(`SELECT r.email FROM tracker_notification_recipients r
+        WHERE r.active = true AND NOT EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(r.email))`);
+      if (orphans.rowCount) console.log('[migrate] These new-job recipients have no tracker account and will stop getting email until one is created: ' + orphans.rows.map(r => r.email).join(', '));
+    } catch (e) { console.error('[migrate] notification pref backfill skipped:', e.message); }
     console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);

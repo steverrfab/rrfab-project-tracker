@@ -3,16 +3,16 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 const STATUS_COLORS = {
   'Awarded': '#22c55e', 'Detailing': '#6366f1', 'Purchasing': '#f59e0b', 'In Fabrication': '#f97316',
   'Ready for Galvanizing/Paint': '#14b8a6', 'In Galvanizing': '#0d9488', 'In Paint': '#7c3aed',
-  'Shipping': '#06b6d4', 'Field/Erection': '#84cc16', 'Completed': '#6b7280', 'On Hold': '#ef4444',
+  'Shipping to Site': '#06b6d4', 'Field/Erection': '#84cc16', 'Completed': '#6b7280', 'On Hold': '#ef4444',
 };
 const STATUSES = Object.keys(STATUS_COLORS);
-const ACTIVE_STAGES = ['Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping', 'Field/Erection'];
+const ACTIVE_STAGES = ['Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping to Site', 'Field/Erection'];
 const DRAWING = ['N/A', 'Not Started', 'In Progress', 'Approved', 'Revision Needed'];
 const CO_STATUS = ['Pending', 'Approved', 'Paid'];
 const PAYAPP_STATUS = ['Draft', 'Submitted', 'Approved', 'Partially Paid', 'Paid'];
 const PMS = ['Joe Jenkins', 'Steve Moskowitz', 'Tanja', 'Unassigned'];
-const SEQ_STATUS = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped', 'Erected'];
-const SEQ_COLORS = { 'Not started': '#9aa0ab', 'In Fabrication': '#f97316', 'In Galvanizing': '#0d9488', 'In Paint': '#7c3aed', 'Shipped': '#06b6d4', 'Erected': '#16a34a' };
+const SEQ_STATUS = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped to Site', 'Erected'];
+const SEQ_COLORS = { 'Not started': '#9aa0ab', 'In Fabrication': '#f97316', 'In Galvanizing': '#0d9488', 'In Paint': '#7c3aed', 'Shipped to Site': '#06b6d4', 'Erected': '#16a34a' };
 const ROLE_LABEL = { super_admin: 'Super Admin', admin: 'Admin', accounting: 'Accounting', pm: 'PM', shop: 'Shop' };
 const DATE_FIELDS = ['Award', 'Projected start', 'Delivery', 'Completed'];
 
@@ -256,7 +256,7 @@ function projDates(p, field) {
 
 function Dashboard({ user, onOpen }) {
   const [projects, setProjects] = useState([]); const [loading, setLoading] = useState(true);
-  const [group, setGroup] = useState('Active'); const [q, setQ] = useState(''); const [pmF, setPmF] = useState('All');
+  const [group, setGroup] = useState('All'); const [q, setQ] = useState(''); const [pmF, setPmF] = useState('All');
   const [vw, setVw] = useState('list'); const [df, setDf] = useState('Award'); const [from, setFrom] = useState(''); const [to, setTo] = useState('');
   const [bmode, setBmode] = useState('job');
   const [modal, setModal] = useState(null);
@@ -492,7 +492,7 @@ function SequenceModal({ projectId, seq, onClose, onSaved }) {
     <div className="row2"><div className="field"><label>Fabrication complete</label><input type="date" value={q.fabDate || ''} onChange={set('fabDate')} /></div><div className="field"><label>Galv out</label><input type="date" value={q.galvOut || ''} onChange={set('galvOut')} /></div></div>
     <div className="row2"><div className="field"><label>Galv back</label><input type="date" value={q.galvBack || ''} onChange={set('galvBack')} /></div><div className="field"><label>Paint complete</label><input type="date" value={q.paintDate || ''} onChange={set('paintDate')} /></div></div>
     <div className="row2"><div className="field"><label>Shipped</label><input type="date" value={q.shipDate || ''} onChange={set('shipDate')} /></div><div className="field"><label>Erected</label><input type="date" value={q.erectDate || ''} onChange={set('erectDate')} /></div></div>
-    <div className="note">Setting status to Shipped or Erected marks the sequence complete.</div>
+    <div className="note">Setting status to Shipped to Site or Erected marks the sequence complete.</div>
     {err && <div className="err">{err}</div>}
     <div className="actions">{q.id && <button className="btn-ghost" style={{ color: 'var(--r)' }} onClick={del}>Delete</button>}<div className="spacer" /><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>{q.id ? 'Save' : 'Add'}</button></div>
   </Modal>;
@@ -707,11 +707,13 @@ function Billing({ onOpen }) {
     <div className="card"><h3>Retainage outstanding <button className="btn-ghost btn-sm" onClick={exportRet}>Export CSV</button></h3><div className="note" style={{ margin: '-4px 0 10px' }}>Every job still holding retainage, oldest first. Completed jobs listed here are waiting on their final release.</div><table><thead><tr><th>Project</th><th>Customer</th><th>Status</th><th>Last pay app</th><th>Held for</th><th className="right">Retainage held</th></tr></thead><tbody>{ret.length ? ret.map((r, i) => <tr key={i} className="row" onClick={() => r.projectId && onOpen(r.projectId)}><td>{r.jobNumber && <span className="joblabel">#{r.jobNumber} </span>}<b>{r.name}</b></td><td className="muted">{r.customer}</td><td>{statusPill(r.status)}</td><td className="muted">{fmtDate(r.lastAppDate)}</td><td className="num">{r.daysHeld} days</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(r.amount)}</td></tr>) : <tr><td colSpan="6" className="empty">No retainage held anywhere.</td></tr>}</tbody></table></div>
     <div className="card"><h3>Margin (active jobs) <button className="btn-ghost btn-sm" onClick={exportMargin}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Status</th><th className="right">Contract sum</th><th className="right">Cost</th><th className="right">Margin $</th><th className="right">Margin %</th></tr></thead><tbody>{margin.length ? margin.map((m, i) => <tr key={i} className="row" onClick={() => m.projectId && onOpen(m.projectId)}><td>{m.jobNumber && <span className="joblabel">#{m.jobNumber} </span>}<b>{m.name}</b><div className="muted" style={{ fontSize: 12 }}>{m.customer}</div></td><td>{statusPill(m.status)}</td><td className="right num">{fmt$(m.contractSum)}</td><td className="right num">{fmt$(m.cost)}</td><td className="right num">{fmt$(m.marginDollars)}</td><td className={'right num ' + gmColor(m.marginPct)}>{m.marginPct.toFixed(1)}%</td></tr>) : <tr><td colSpan="6" className="empty">No active jobs.</td></tr>}</tbody>{margin.length > 0 && <tfoot><tr><td>Totals</td><td /><td className="right num">{fmt$(mt.contractSum)}</td><td className="right num">{fmt$(mt.cost)}</td><td className="right num">{fmt$(mt.marginDollars)}</td><td className={'right num ' + gmColor(mt.marginPct)}>{mt.marginPct.toFixed(1)}%</td></tr></tfoot>}</table></div>
     <div className="card"><h3>Payment history (paid)</h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Paid date</th><th className="right">Amount paid</th></tr></thead><tbody>{d.paidHist.length ? d.paidHist.map((h, i) => <tr key={i} className="row" onClick={() => h.projectId && onOpen(h.projectId)}><td>{h.jobNumber && <span className="joblabel">#{h.jobNumber} </span>}<b>{h.name}</b></td><td>#{h.applicationNumber}{h.isRetainageRelease && relChip}</td><td className="muted">{fmtDate(h.paidDate)}</td><td className="right num g" style={{ fontWeight: 700 }}>{fmt$(h.amountPaid)}</td></tr>) : <tr><td colSpan="4" className="empty">No payments recorded yet.</td></tr>}</tbody></table></div>
-    <div className="card"><h3>May need billing</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Active jobs where the contract is ahead of what has been billed.</div><table><thead><tr><th>Project</th><th>Status</th><th>Last billed</th><th className="right">Unbilled work</th></tr></thead><tbody>{d.needsBilling.length ? d.needsBilling.map((n, i) => <tr key={i} className="row" onClick={() => n.projectId && onOpen(n.projectId)}><td>{n.jobNumber && <span className="joblabel">#{n.jobNumber} </span>}<b>{n.name}</b></td><td>{statusPill(n.status)}</td><td className="muted">{n.lastBilled ? fmtDate(n.lastBilled) : 'never billed'}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(n.unbilled)}</td></tr>) : <tr><td colSpan="4" className="empty">No active jobs with unbilled work.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>May need billing</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Jobs where the contract is ahead of what has been billed. Completed jobs are included, since finishing the steel does not mean the job is fully billed.</div><table><thead><tr><th>Project</th><th>Status</th><th>Last billed</th><th className="right">Unbilled work</th></tr></thead><tbody>{d.needsBilling.length ? d.needsBilling.map((n, i) => <tr key={i} className="row" onClick={() => n.projectId && onOpen(n.projectId)}><td>{n.jobNumber && <span className="joblabel">#{n.jobNumber} </span>}<b>{n.name}</b></td><td>{statusPill(n.status)}</td><td className="muted">{n.lastBilled ? fmtDate(n.lastBilled) : 'never billed'}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(n.unbilled)}</td></tr>) : <tr><td colSpan="4" className="empty">No jobs with unbilled work.</td></tr>}</tbody></table></div>
   </div>;
 }
 
 const WHATS_NEW = [
+  { v: 'v1.7', date: 'July 27, 2026', title: 'Clearer statuses and notifications you control',
+    body: 'Shipping is now Shipping to Site, and the sequence status Shipped is now Shipped to Site, so there is no question where a load is headed. Trips to the galvanizer and painter were always covered by their own stages. A job flips to Shipping to Site when the first load leaves for the job site. Completed means the steel is done and off our plate, not that the job is fully billed, so completed jobs now show up under May need billing if the contract is ahead of what has been invoiced. Email notifications moved onto each person: hit Notifications in the top bar to pick what you get, or set it for the whole team under Settings. New events include any stage change, job completed, and job put on hold. Projects now opens on the All tab.' },
   { v: 'v1.6', date: 'July 16, 2026', title: 'Update notifications',
     body: 'When a new version of the tracker is released, a banner now appears at the top of the screen. Click Update now to refresh to the latest version. You no longer have to wonder whether you are on the current version.' },
   { v: 'v1.5', date: 'July 16, 2026', title: 'Award date on the dashboard',
@@ -745,29 +747,49 @@ function WhatsNew() {
   </div>;
 }
 
+// Self-serve notification settings. Every role gets this, so the shop can turn
+// on the stage moves they care about without an admin doing it for them.
+function MyNotificationsModal({ onClose }) {
+  const [events, setEvents] = useState([]); const [prefs, setPrefs] = useState({});
+  const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  useEffect(() => { api.get('/api/notification-prefs').then(r => { setEvents(r.events || []); setPrefs(r.prefs || {}); setLoading(false); }).catch(e => { setErr(e.message); setLoading(false); }); }, []);
+  const save = async () => { setBusy(true); setErr(null); try { await api.send('PUT', '/api/notification-prefs', { prefs }); onClose(); } catch (e) { setErr(e.message); setBusy(false); } };
+  return <Modal onClose={onClose}><h2>My notifications</h2>
+    <div className="note" style={{ margin: '0 0 12px' }}>Pick which tracker emails you want. Leave everything unticked to get none.</div>
+    {loading ? <div className="empty">Loading...</div> : events.map(e => <label key={e.key} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '9px 0', borderBottom: '1px solid var(--bd)', cursor: 'pointer' }}>
+      <input type="checkbox" style={{ marginTop: 3 }} checked={!!prefs[e.key]} onChange={ev => setPrefs({ ...prefs, [e.key]: ev.target.checked })} />
+      <span><span style={{ fontWeight: 600 }}>{e.label}</span><div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>{e.help}</div></span>
+    </label>)}
+    {err && <div className="err">{err}</div>}
+    <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy || loading} onClick={save}>Save</button></div>
+  </Modal>;
+}
+
 function Settings() {
   const [users, setUsers] = useState([]); const [modal, setModal] = useState(false); const [edit, setEdit] = useState(null);
-  const [recips, setRecips] = useState([]); const [rEmail, setREmail] = useState(''); const [rName, setRName] = useState(''); const [rErr, setRErr] = useState('');
+  const [events, setEvents] = useState([]); const [nErr, setNErr] = useState('');
   const load = useCallback(() => api.get('/api/users').then(setUsers), []);
-  const loadR = useCallback(() => api.get('/api/notification-recipients').then(setRecips).catch(() => {}), []);
-  useEffect(() => { load(); loadR(); }, [load, loadR]);
-  const addR = async () => { const email = rEmail.trim(); if (!email) { setRErr('Enter an email address.'); return; } setRErr(''); try { await api.send('POST', '/api/notification-recipients', { email, name: rName.trim() }); setREmail(''); setRName(''); loadR(); } catch (e) { setRErr(e.message); } };
-  const toggleR = async (r) => { try { await api.send('PUT', '/api/notification-recipients/' + r.id, { active: !r.active }); loadR(); } catch (e) { alert(e.message); } };
-  const delR = async (r) => { if (!confirm('Remove ' + r.email + ' from the notification list?')) return; try { await api.send('DELETE', '/api/notification-recipients/' + r.id); loadR(); } catch (e) { alert(e.message); } };
+  useEffect(() => { load(); api.get('/api/notification-prefs').then(r => setEvents(r.events || [])).catch(() => {}); }, [load]);
+  // Optimistic tick: flip the box straight away, roll it back if the save fails.
+  const toggleNotif = async (u, key, on) => {
+    const next = { ...(u.notificationPrefs || {}), [key]: on };
+    setNErr(''); setUsers(us => us.map(x => x.id === u.id ? { ...x, notificationPrefs: next } : x));
+    try { await api.send('PUT', '/api/users/' + u.id, { name: u.name, role: u.role, active: u.active, notificationPrefs: next }); }
+    catch (e) { setNErr(e.message); load(); }
+  };
   return <div className="wrap"><h1 style={{ fontSize: 22, margin: '12px 0' }}>Settings</h1>
     <div className="card"><h3>Users &amp; roles <button className="btn-pri btn-sm" onClick={() => setModal(true)}>+ Add user</button></h3>
       <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th /></tr></thead><tbody>{users.map(u => <tr key={u.id}><td><b>{u.name}</b></td><td className="muted">{u.email}</td><td>{ROLE_LABEL[u.role]}</td><td>{u.active ? <span className="g">Active</span> : <span className="muted">Disabled</span>}</td><td className="right"><button className="btn-ghost btn-sm" onClick={() => setEdit(u)}>Edit</button></td></tr>)}</tbody></table>
       <div className="note" style={{ marginTop: 10 }}>Use Edit to reset anyone's password, change their role, or disable them. New users sign in with the temporary password you set, and can change it later via Forgot password.</div>
     </div>
-    <div className="card"><h3>New-job email notifications</h3>
-      <div className="note" style={{ margin: '-4px 0 12px', lineHeight: 1.6 }}>These people get an email automatically whenever a new job lands in the tracker from a won bid. Add any email address. <b>Deactivate</b> pauses someone without removing them; <b>Remove</b> takes them off the list.</div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-        <input style={{ flex: 2, minWidth: 200 }} type="email" placeholder="email@rrfab.com" value={rEmail} onChange={e => setREmail(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addR(); }} />
-        <input style={{ flex: 1, minWidth: 140 }} type="text" placeholder="Name (optional)" value={rName} onChange={e => setRName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addR(); }} />
-        <button className="btn-pri" onClick={addR}>Add</button>
-      </div>
-      {rErr && <div className="err">{rErr}</div>}
-      {recips.length ? <table><thead><tr><th>Email</th><th>Name</th><th>Status</th><th /></tr></thead><tbody>{recips.map(r => <tr key={r.id}><td><b>{r.email}</b></td><td className="muted">{r.name || '\u2014'}</td><td>{r.active ? <span className="g">Active</span> : <span className="muted">Inactive</span>}</td><td className="right"><button className="btn-ghost btn-sm" onClick={() => toggleR(r)}>{r.active ? 'Deactivate' : 'Activate'}</button> <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delR(r)}>Remove</button></td></tr>)}</tbody></table> : <div className="empty">No recipients yet. Add one above.</div>}
+    <div className="card"><h3>Email notifications</h3>
+      <div className="note" style={{ margin: '-4px 0 12px', lineHeight: 1.6 }}>Who gets emailed about what. Tick a box to sign someone up; untick to stop it. People only ever get the events they are ticked for. <b>Any stage change</b> covers every move, so someone ticked for that does not also need Job completed or Job put on hold.</div>
+      {nErr && <div className="err">{nErr}</div>}
+      {events.length ? <table><thead><tr><th>Person</th>{events.map(e => <th key={e.key} className="right" title={e.help}>{e.label}</th>)}</tr></thead><tbody>{users.map(u => <tr key={u.id}>
+        <td><b>{u.name}</b><div className="muted" style={{ fontSize: 12 }}>{u.email}{u.active ? '' : ' \u00b7 disabled'}</div></td>
+        {events.map(e => <td key={e.key} className="right"><input type="checkbox" checked={!!(u.notificationPrefs || {})[e.key]} disabled={!u.active} onChange={ev => toggleNotif(u, e.key, ev.target.checked)} /></td>)}
+      </tr>)}</tbody></table> : <div className="empty">Loading notification settings...</div>}
+      <div className="note" style={{ marginTop: 10 }}>Disabled accounts never get email, whatever is ticked. Everyone can also manage their own from the <b>Notifications</b> button in the top bar.</div>
     </div>
     {modal && <AddUserModal onClose={() => setModal(false)} onSaved={() => { setModal(false); load(); }} />}
     {edit && <EditUserModal user={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
@@ -921,6 +943,7 @@ function ResetPassword({ token }) {
 }
 
 function Main({ user, onLogout }) {  const [view, setView] = useState({ name: 'projects' });
+  const [notifOpen, setNotifOpen] = useState(false);
   const nav = name => setView({ name });
   return <>
     <div className="top"><div className="topin">
@@ -935,8 +958,10 @@ function Main({ user, onLogout }) {  const [view, setView] = useState({ name: 'p
       </nav>
       <div className="spacer" />
       <span className="who">{user.name} · {ROLE_LABEL[user.role]}</span>
+      <button className="btn-ghost btn-sm" onClick={() => setNotifOpen(true)}>Notifications</button>
       <button className="btn-ghost btn-sm" onClick={onLogout}>Log out</button>
     </div></div>
+    {notifOpen && <MyNotificationsModal onClose={() => setNotifOpen(false)} />}
     {view.name === 'projects' && <Dashboard user={user} onOpen={id => setView({ name: 'detail', id })} />}
     {view.name === 'detail' && <Detail id={view.id} user={user} onBack={() => nav('projects')} />}
     {view.name === 'billing' && can.seeMoney(user.role) && <Billing onOpen={id => setView({ name: 'detail', id })} />}
