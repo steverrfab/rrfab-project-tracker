@@ -718,6 +718,8 @@ function Billing({ onOpen }) {
 }
 
 const WHATS_NEW = [
+  { v: 'v1.8', date: 'July 27, 2026', title: 'Jobs with no retainage stay at zero',
+    body: 'Plenty of our jobs do not hold retainage. Set retainage to 0 on a pay app and it now stays at 0 when you save, including on the final bill. Before this, saving with retainage set to zero quietly put it back to 10% and kept withholding money that should have been billed. The retainage box on a new pay app also starts from whatever the last pay app on that job used, so you only set it once per job instead of every time. Pay apps saved before today still have the old 10% on them; open one and save it again to correct it.' },
   { v: 'v1.7', date: 'July 27, 2026', title: 'Clearer statuses and notifications you control',
     body: 'Shipping is now Shipping to Site, and the sequence status Shipped is now Shipped to Site, so there is no question where a load is headed. Trips to the galvanizer and painter were always covered by their own stages. A job flips to Shipping to Site when the first load leaves for the job site. Completed means the steel is done and off our plate, not that the job is fully billed, so completed jobs now show up under May need billing if the contract is ahead of what has been invoiced. Email notifications moved onto each person: hit Notifications in the top bar to pick what you get, or set it for the whole team under Settings. New events include any stage change, job completed, and job put on hold. Projects now opens on the All tab.' },
   { v: 'v1.6', date: 'July 16, 2026', title: 'Update notifications',
