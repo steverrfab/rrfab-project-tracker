@@ -28,11 +28,25 @@ const can = {
   archive: r => ['super_admin', 'admin'].includes(r),
 };
 
-const today = () => new Date().toISOString().slice(0, 10);
-const fmt$ = v => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : '$' + Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+// Today's date where the user is (not UTC, which flips to tomorrow in the evening).
+const today = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+const fmt$ = v => { if (v === null || v === undefined || v === '' || isNaN(v)) return '—'; const n = Math.round(Number(v)); return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US'); };
+// Pay-app money shows cents, since that is what goes on the G702.
+const fmtC = v => { if (v === null || v === undefined || v === '' || isNaN(v)) return '—'; const n = Math.round(Number(v) * 100) / 100; return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
 const fmtK = v => { const n = parseFloat(v); if (isNaN(n)) return '—'; if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M'; if (Math.abs(n) >= 1000) return '$' + (n / 1000).toFixed(0) + 'K'; return '$' + Math.round(n); };
 const fmtDate = d => d ? new Date((typeof d === 'string' ? d.slice(0, 10) : d) + 'T00:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : '—';
-const fmtWhen = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+// A plain date ("2026-07-23") is a calendar day, not midnight UTC, so it must
+// not slide back a day in Eastern time.
+const asDate = d => (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) ? new Date(d + 'T00:00:00') : new Date(d);
+const fmtWhen = d => d ? asDate(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+// Contract sum = original contract + approved/paid change orders. Margin counts
+// the cost of those change orders too.
+const contractOf = p => (Number(p.sellPrice) || 0) + (Number(p.approvedCoTotal) || 0);
+const costOf = p => (Number(p.cost) || 0) + (Number(p.approvedCoCost) || 0);
+const marginOf = p => { const c = contractOf(p); return c > 0 ? (c - costOf(p)) / c * 100 : 0; };
+// Draft pay apps have not been sent, so billed totals come from the latest sent one.
+const lastSentApp = rows => { for (let i = rows.length - 1; i >= 0; i--) if (rows[i].status !== 'Draft') return rows[i]; return null; };
+const startPassed = p => p.status === 'Awarded' && p.projectedStartDate && daysUntil(p.projectedStartDate) < 0;
 const daysUntil = d => d ? Math.round((new Date(d.slice(0, 10) + 'T00:00:00') - new Date(today() + 'T00:00:00')) / 86400000) : null;
 const gmColor = gm => gm >= 20 ? 'g' : gm >= 15 ? 'a' : 'r';
 
@@ -275,11 +289,12 @@ function ProjectModal({ initial, onClose, onSaved }) {
     <h2>{p.id ? 'Edit project' : 'New project'}</h2>
     <div className="row2"><div className="field"><label>Job #</label><input value={p.jobNumber} onChange={set('jobNumber')} /></div><div className="field"><label>Project name</label><input value={p.name} onChange={set('name')} /></div></div>
     <div className="row2"><div className="field"><label>Customer / GC</label><input value={p.customer} onChange={set('customer')} /></div><div className="field"><label>Status</label><select value={p.status} onChange={set('status')}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select></div></div>
-    <div className="row2"><div className="field"><label>PM</label><select value={p.pm} onChange={set('pm')}>{PMS.map(s => <option key={s}>{s}</option>)}</select></div><div className="field"><label>Drawing status</label><select value={p.drawingStatus} onChange={set('drawingStatus')}>{DRAWING.map(s => <option key={s}>{s}</option>)}</select></div></div>
+    <div className="row2"><div className="field"><label>PM</label><select value={p.pm || ''} onChange={set('pm')}><option value="">Not assigned</option>{PMS.filter(s => s !== 'Unassigned').map(s => <option key={s}>{s}</option>)}{p.pm && !PMS.includes(p.pm) && <option>{p.pm}</option>}</select></div><div className="field"><label>Drawing status</label><select value={p.drawingStatus} onChange={set('drawingStatus')}>{DRAWING.map(s => <option key={s}>{s}</option>)}</select></div></div>
     <div className="row2"><div className="field"><label>Original contract ($)</label><input type="number" value={p.sellPrice} onChange={set('sellPrice')} /></div><div className="field"><label>Our cost ($)</label><input type="number" value={p.cost} onChange={set('cost')} /></div></div>
     <div className="calc"><div><span>Gross profit</span><span className="num">{fmt$(gp)}</span></div><div><span>Gross margin</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div></div>
     <div className="field" style={{ marginTop: 12 }}><label>Actual cost to date ($)</label><input type="number" value={p.actualCost == null ? '' : p.actualCost} onChange={e => setP({ ...p, actualCost: e.target.value === '' ? null : e.target.value })} placeholder="Leave blank until you have it" /></div>
     {hasActual && <div className="calc"><div><span>Actual gross profit</span><span className="num">{fmt$(agp)}</span></div><div><span>Actual margin</span><span className={'num ' + gmColor(agm)}>{agm.toFixed(1)}%</span></div></div>}
+    {(Number(p.approvedCoTotal) || 0) !== 0 && <div className="note">Approved change orders add {fmt$(p.approvedCoTotal)} to the contract{Number(p.approvedCoCost) ? ' and ' + fmt$(p.approvedCoCost) + ' to cost' : ''}. The numbers above are the original contract only.</div>}
     <div className="note">Actual cost shows up next to the estimate on this job&apos;s bid in R&amp;R Bid.{p.shopLaborCost != null ? ' ShopTrack has ' + fmt$(p.shopLaborCost) + ' of shop labor logged on this job so far (straight time, not included in this number unless you add it).' : ''}</div>
     <div className="row2" style={{ marginTop: 12 }}><div className="field"><label>Award date</label><input type="date" value={p.awardDate || ''} onChange={set('awardDate')} /></div><div className="field"><label>Projected start <span style={{ color: 'var(--r)' }}>*</span></label><input type="date" value={p.projectedStartDate || ''} onChange={set('projectedStartDate')} /></div></div>
     <div className="row2"><div className="field"><label>Fab start</label><input type="date" value={p.fabStartDate || ''} onChange={set('fabStartDate')} /></div><div className="field"><label>Galv send</label><input type="date" value={p.galvSendDate || ''} onChange={set('galvSendDate')} /></div></div>
@@ -308,10 +323,12 @@ function Dashboard({ user, onOpen }) {
   useEffect(() => { load(); }, [load]);
 
   const active = GROUPS.Active(projects); const backlog = GROUPS.Backlog(projects);
-  const activeVal = active.reduce((s, p) => s + (Number(p.sellPrice) || 0), 0);
-  const backlogVal = backlog.reduce((s, p) => s + (Number(p.sellPrice) || 0), 0);
-  let num = 0, den = 0; active.forEach(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; num += gm * sp; den += sp; });
-  const avgGM = den ? num / den : 0;
+  const activeVal = active.reduce((s, p) => s + contractOf(p), 0);
+  const backlogVal = backlog.reduce((s, p) => s + contractOf(p), 0);
+  // Weighted margin = total margin dollars / total contract.
+  let num = 0, den = 0; active.forEach(p => { const c = contractOf(p); num += c - costOf(p); den += c; });
+  const avgGM = den ? num / den * 100 : null;
+  const lateStarts = projects.filter(startPassed).length;
   const pms = ['All', ...Array.from(new Set(projects.map(p => p.pm).filter(Boolean)))];
 
   const dateOk = p => { if (!from && !to) return true; const ds = projDates(p, df); if (!ds.length) return false; return ds.some(d => (!from || d >= from) && (!to || d <= to)); };
@@ -329,9 +346,9 @@ function Dashboard({ user, onOpen }) {
 
   const exportCsv = () => {
     const src = vw === 'board' ? filtered : GROUPS[group](filtered);
-    const head = ['Job #', 'Project', 'Customer'].concat(seeMoney ? ['Contract', 'Margin %'] : []).concat(['Status', 'Drawings', 'Material ordered', 'Sequences done', 'PM', 'Awarded']);
+    const head = ['Job #', 'Project', 'Customer'].concat(seeMoney ? ['Contract sum', 'Margin %'] : []).concat(['Status', 'Drawings', 'Material ordered', 'Sequences done', 'PM', 'Awarded']);
     const body = src.map(p => {
-      const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
+      const sp = contractOf(p), gm = marginOf(p);
       const done = (p.deliveries || []).filter(x => x.done).length;
       return [p.jobNumber, p.name, p.customer].concat(seeMoney ? [sp, gm.toFixed(1)] : []).concat([p.status, p.drawingStatus || 'N/A', p.materialOrdered ? 'Yes' : 'No', done + '/' + (p.deliveries || []).length, p.pm, p.awardDate ? fmtDate(p.awardDate) : '']);
     });
@@ -345,7 +362,7 @@ function Dashboard({ user, onOpen }) {
         <div className="stat"><div className="l">Active jobs</div><div className="v">{active.length}</div><div className="s">in production</div></div>
         {seeMoney && <div className="stat"><div className="l">Active value</div><div className="v num">{fmtK(activeVal)}</div><div className="s">contract sum, in production</div></div>}
         {seeMoney ? <div className="stat"><div className="l">Awarded backlog</div><div className="v num">{fmtK(backlogVal)}</div><div className="s">{backlog.length} won, not started</div></div> : <div className="stat"><div className="l">Awarded backlog</div><div className="v">{backlog.length}</div><div className="s">won, not started</div></div>}
-        {seeMoney && <div className="stat"><div className="l">Avg gross margin</div><div className={'v num ' + gmColor(avgGM)}>{avgGM.toFixed(1)}%</div><div className="s">active, weighted</div></div>}
+        {seeMoney && <div className="stat"><div className="l">Avg gross margin</div>{avgGM == null ? <div className="v num muted">—</div> : <div className={'v num ' + gmColor(avgGM)}>{avgGM.toFixed(1)}%</div>}<div className="s">{avgGM == null ? 'no jobs in production yet' : 'active, weighted, estimate'}</div></div>}
       </div>
       <div className="toolbar">
         {vw === 'list' && <div className="groupbar">{Object.keys(GROUPS).map(g => <button key={g} className={'gt' + (group === g ? ' on' : '')} onClick={() => setGroup(g)}>{g} <span style={{ opacity: .7 }}>{GROUPS[g](projects).length}</span></button>)}</div>}
@@ -359,19 +376,20 @@ function Dashboard({ user, onOpen }) {
         <div className="filt"><label>Date filter</label><select value={df} onChange={e => setDf(e.target.value)}>{DATE_FIELDS.map(f => <option key={f}>{f}</option>)}</select><label>from</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} /><label>to</label><input type="date" value={to} onChange={e => setTo(e.target.value)} />{(from || to) && <button className="btn-ghost btn-sm" onClick={() => { setFrom(''); setTo(''); }}>Clear</button>}</div>
       </div>
 
-      {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? (bmode === 'seq' ? 'Drag a sequence to another column to change its stage. Cards are labeled by job.' : 'Drag a card to another column to change its stage.') : 'Read-only view.'}</div>{bmode === 'job' ? <div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0; return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div>{p.needsSetup && <div style={{ marginTop: 6 }}>{setupBadge(p)}</div>}{seeMoney && <div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmtK(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div>}</div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div> : <div className="board">{SEQ_STATUS.map(st => { const cards = seqCards.filter(x => (x.status || 'Not started') === st); const c = SEQ_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveSeq(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{cards.length}</span></h4>{cards.map(x => <div className="bcard" key={x.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', x.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(x._p.id)}><div style={{ fontSize: 11, fontWeight: 600, color: '#ff6b35', marginBottom: 3 }}>{x._p.jobNumber ? '#' + x._p.jobNumber : x._p.name}</div><div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>{x.desc || 'Sequence'}</div></div>)}{!cards.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div>}</>
-        : <div className="panel"><table><thead><tr><th>Project</th>{seeMoney && <th>Contract</th>}<th>Status</th><th>Sequences</th><th>PM</th><th>Awarded</th><th>Projected start</th></tr></thead>
+      {lateStarts > 0 && <div className="note" style={{ marginTop: 10, color: '#b45309' }}>{lateStarts} job{lateStarts === 1 ? ' is' : 's are'} still Awarded after the projected start date. Move {lateStarts === 1 ? 'it' : 'them'} to the right stage or push the date out.</div>}
+      {vw === 'board' ? <><div className="note" style={{ marginTop: 14, marginBottom: -4 }}>{editor ? (bmode === 'seq' ? 'Drag a sequence to another column to change its stage. Cards are labeled by job.' : 'Drag a card to another column to change its stage.') : 'Read-only view.'}</div>{bmode === 'job' ? <div className="board">{STATUSES.map(st => { const items = list.filter(p => p.status === st); const c = STATUS_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveStage(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{items.length}</span></h4>{items.map(p => { const sp = contractOf(p), gm = marginOf(p); return <div className="bcard" key={p.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', p.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(p.id)}><div className="nm">{p.name}</div><div className="cu">{p.customer}</div>{p.needsSetup && <div style={{ marginTop: 6 }}>{setupBadge(p)}</div>}{seeMoney && <div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', fontSize: 12 }}><span className="num">{fmt$(sp)}</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div>}</div>; })}{!items.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div> : <div className="board">{SEQ_STATUS.map(st => { const cards = seqCards.filter(x => (x.status || 'Not started') === st); const c = SEQ_COLORS[st]; return <div className="bcol" key={st} onDragOver={editor ? e => e.preventDefault() : undefined} onDrop={editor ? e => { e.preventDefault(); moveSeq(e.dataTransfer.getData('text/plain'), st); } : undefined}><h4><span style={{ color: c }}>{st}</span><span className="muted">{cards.length}</span></h4>{cards.map(x => <div className="bcard" key={x.id} draggable={editor} onDragStart={e => e.dataTransfer.setData('text/plain', x.id)} style={{ cursor: editor ? 'grab' : 'pointer' }} onClick={() => onOpen(x._p.id)}><div style={{ fontSize: 11, fontWeight: 600, color: '#ff6b35', marginBottom: 3 }}>{x._p.jobNumber ? '#' + x._p.jobNumber : x._p.name}</div><div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.35 }}>{x.desc || 'Sequence'}</div></div>)}{!cards.length && <div className="empty" style={{ fontSize: 11 }}>—</div>}</div>; })}</div>}</>
+        : <div className="panel"><table><thead><tr><th>Project</th>{seeMoney && <th className="right">Contract sum</th>}<th>Status</th><th>Sequences</th><th>PM</th><th>Awarded</th><th>Projected start</th></tr></thead>
           <tbody>{list.length ? list.map(p => {
-            const sp = Number(p.sellPrice) || 0, gm = sp > 0 ? (sp - (Number(p.cost) || 0)) / sp * 100 : 0;
+            const sp = contractOf(p);
             const done = (p.deliveries || []).filter(d => d.done).length; const od = overdueCount(p);
-            return <tr key={p.id} className="row" onClick={() => p.needsSetup && editor ? setModal({ project: p }) : onOpen(p.id)}>
+            return <tr key={p.id} className="row" onClick={() => onOpen(p.id)}>
               <td>{p.jobNumber && <div className="joblabel">#{p.jobNumber}</div>}<div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>{p.name}{setupBadge(p)}</div><div className="muted" style={{ fontSize: 12 }}>{p.customer}</div></td>
-              {seeMoney && <td className="num">{fmtK(sp)}</td>}
+              {seeMoney && <td className="num right">{fmt$(sp)}{Number(p.pendingCoTotal) ? <div className="muted" style={{ fontSize: 11 }}>+{fmt$(p.pendingCoTotal)} pending C/O</div> : null}</td>}
               <td onClick={e => e.stopPropagation()}>{editor ? <select value={p.status} onChange={e => quickStatus(p, e.target.value)} style={{ fontSize: 12, padding: '4px 8px' }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}</td>
               <td className="muted">{(p.deliveries || []).length ? <>{done}/{p.deliveries.length}{od > 0 && <span className="flag"> · {od} overdue</span>}</> : '—'}</td>
               <td className="muted">{p.pm || '—'}</td>
               <td className="muted">{p.awardDate ? fmtDate(p.awardDate) : '—'}</td>
-              <td className="muted">{p.projectedStartDate ? fmtDate(p.projectedStartDate) : (p.needsSetup ? <span className="setup">Set start</span> : '—')}</td>
+              <td className="muted">{p.projectedStartDate ? <>{fmtDate(p.projectedStartDate)}{startPassed(p) && <div className="flag" style={{ fontSize: 11 }}>date passed, still Awarded</div>}</> : (p.needsSetup ? (editor ? <span className="setup" style={{ cursor: 'pointer' }} title="Open the job's details to set it up" onClick={e => { e.stopPropagation(); setModal({ project: p }); }}>Set start</span> : <span className="setup">Set start</span>) : '—')}</td>
             </tr>;
           }) : <tr><td colSpan={seeMoney ? 7 : 6} className="empty">No projects match.</td></tr>}</tbody>
         </table></div>}
@@ -381,15 +399,15 @@ function Dashboard({ user, onOpen }) {
   </div>;
 }
 
-function ItemModal({ item, onClose }) {
+function ItemModal({ item, onClose, onEdit }) {
   if (item.kind === 'co') { const c = item.data; return <Modal onClose={onClose}><h2>Change order {c.coNumber}</h2>
-    <div className="calc"><div><span>Description</span><span>{c.description || '—'}</span></div><div><span>Amount</span><span className="num">{fmt$(c.amount)}</span></div><div><span>Status</span><span>{c.status}</span></div><div><span>Submitted</span><span>{fmtDate(c.submittedDate)}</span></div><div><span>Approved</span><span>{fmtDate(c.approvedDate)}</span></div><div><span>Paid</span><span>{fmtDate(c.paidDate)}</span></div></div>
+    <div className="calc"><div><span>Description</span><span>{c.description || '—'}</span></div><div><span>Amount</span><span className="num">{fmt$(c.amount)}</span></div>{c.cost != null && <><div><span>Our cost</span><span className="num">{fmt$(c.cost)}</span></div><div><span>Margin</span><span className="num">{c.amount ? ((c.amount - c.cost) / c.amount * 100).toFixed(1) + '%' : '—'}</span></div></>}<div><span>Status</span><span>{c.status}</span></div><div><span>Submitted</span><span>{fmtDate(c.submittedDate)}</span></div><div><span>Approved</span><span>{fmtDate(c.approvedDate)}</span></div><div><span>Paid</span><span>{fmtDate(c.paidDate)}</span></div></div>
     <div className="note" style={{ marginTop: 10 }}>{(c.status === 'Approved' || c.status === 'Paid') ? 'This change order is included in the contract sum.' : c.status === 'Withdrawn' ? 'Withdrawn in R&R Bid (rejected, moved back to draft, or deleted). Kept here for the record and not counted in the contract sum.' : 'Pending change orders do not affect the contract sum yet.'}</div>
     {c.fromBid && <div className="note" style={{ marginTop: 6 }}>This change order comes from R&amp;R Bid. Its number, description, amount and status follow the bid tool, so change those there. Marking it Paid happens here, and the bid tool never undoes that.</div>}
-    <div className="actions"><button className="btn-ghost" onClick={onClose}>Close</button></div></Modal>; }
+    <div className="actions">{onEdit && <button className="btn-pri" onClick={() => onEdit(c)}>{c.fromBid ? (c.status === 'Paid' ? 'Change paid status' : 'Mark paid') : 'Edit'}</button>}<button className="btn-ghost" onClick={onClose}>Close</button></div></Modal>; }
   const a = item.data; return <Modal onClose={onClose}><h2>Pay Application #{a.applicationNumber}</h2>
-    <div className="calc"><div><span>Period through</span><span>{fmtDate(a.periodEnd)}</span></div><div><span>Completed to date</span><span className="num">{fmt$(a.workCompletedToDate)}</span></div><div><span>Retainage ({a.retainagePct}%)</span><span className="num">- {fmt$(a.retainageHeld)}</span></div><div className="tot"><span>Payment due</span><span className="num">{fmt$(a.currentPaymentDue)}</span></div></div>
-    <div style={{ marginTop: 10, display: 'flex', justifyContent: 'space-between' }}><span>Status: {payTag(a.status)}</span><span className={a.amountPaid ? 'g' : 'muted'}>{a.amountPaid ? 'Paid ' + fmt$(a.amountPaid) + ' on ' + fmtDate(a.paidDate) : 'Not paid'}</span></div>
+    <div className="calc"><div><span>Period through</span><span>{fmtDate(a.periodEnd)}</span></div><div><span>Completed to date</span><span className="num">{fmtC(a.workCompletedToDate)}</span></div><div><span>Retainage ({a.retainagePct}%)</span><span className="num">- {fmtC(a.retainageHeld)}</span></div><div className="tot"><span>Payment due</span><span className="num">{fmtC(a.currentPaymentDue)}</span></div></div>
+    <div style={{ marginTop: 10, display: 'flex', justifyContent: 'space-between' }}><span>Status: {payTag(a.status)}</span><span className={a.amountPaid ? 'g' : 'muted'}>{a.amountPaid ? 'Paid ' + fmtC(a.amountPaid) + ' on ' + fmtDate(a.paidDate) : 'Not paid'}</span></div>
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Close</button></div></Modal>;
 }
 
@@ -407,14 +425,38 @@ function Detail({ id, user, onBack, bidUrl }) {
   useEffect(() => { load(); }, [load]);
   if (!p) return <div className="wrap"><div className="who" style={{ marginTop: 30 }}>Loading…</div></div>;
 
-  const approvedCO = cos.filter(c => c.status === 'Approved' || c.status === 'Paid').reduce((s, c) => s + Number(c.amount || 0), 0);
+  const counted = cos.filter(c => c.status === 'Approved' || c.status === 'Paid');
+  const approvedCO = counted.reduce((s, c) => s + Number(c.amount || 0), 0);
+  const approvedCOCost = counted.reduce((s, c) => s + Number(c.cost || 0), 0);
+  const pendingCO = cos.filter(c => c.status === 'Pending').reduce((s, c) => s + Number(c.amount || 0), 0);
   const contractSum = (Number(p.sellPrice) || 0) + approvedCO;
+  const estCost = (Number(p.cost) || 0) + approvedCOCost;
   const last = invs[invs.length - 1];
-  const billed = last ? Number(last.workCompletedToDate) : 0;
-  const retHeld = last ? Number(last.retainageHeld) : 0;
+  const sent = lastSentApp(invs);
+  const drafts = invs.filter(a => a.status === 'Draft');
+  const billed = sent ? Number(sent.workCompletedToDate) : 0;
+  const retHeld = sent ? Number(sent.retainageHeld) : 0;
   const totalPaid = invs.reduce((s, a) => s + Number(a.amountPaid || 0), 0);
-  const gp = contractSum - (Number(p.cost) || 0); const gm = contractSum > 0 ? gp / contractSum * 100 : 0;
+  const owed = invs.filter(a => a.status !== 'Draft').reduce((s, a) => s + Math.max(0, Number(a.currentPaymentDue || 0) - Number(a.amountPaid || 0)), 0);
+  const toFinish = contractSum - billed;
+  const gp = contractSum - estCost; const gm = contractSum > 0 ? gp / contractSum * 100 : 0;
   const agm = contractSum > 0 && p.actualCost != null ? (contractSum - Number(p.actualCost)) / contractSum * 100 : 0;
+  const sovList = Array.isArray(sov) ? sov : [];
+  const sovTotal = sovList.reduce((s, l) => s + Number(l.scheduledValue || 0), 0);
+  const bidDiff = !!p.bidDiff;
+  const bidDiffText = [
+    Math.abs((Number(p.sellPrice) || 0) - (p.bidContract || 0)) >= 1 ? 'Contract: ' + fmt$(p.sellPrice) + ' here, ' + fmt$(p.bidContract) + ' in the bid.' : '',
+    p.bidCost != null && Math.abs((Number(p.cost) || 0) - p.bidCost) >= 1 ? 'Our cost: ' + fmt$(p.cost) + ' here, ' + fmt$(p.bidCost) + ' in the bid.' : '',
+  ].filter(Boolean).join(' ');
+  const useBidNumbers = async () => {
+    if (!confirm('Update this job to match R&R Bid?\n\n' + bidDiffText.replace(/ (?=Our cost)/, '\n') + '\n\nPay apps and change orders are not changed.')) return;
+    try { await api.send('POST', '/api/projects/' + p.id + '/bid-numbers', { action: 'use' }); } catch (e) { alert(e.message); }
+    load();
+  };
+  const keepOurNumbers = async () => {
+    try { await api.send('POST', '/api/projects/' + p.id + '/bid-numbers', { action: 'keep' }); } catch (e) { alert(e.message); }
+    load();
+  };
   const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role); const eS = ['super_admin', 'admin', 'pm', 'shop'].includes(user.role); const eA = can.archive(user.role);
   const seeMoney = can.seeMoney(user.role);
   // Map each pay app (invoice) to its attached signed pay app document, if any.
@@ -432,8 +474,9 @@ function Detail({ id, user, onBack, bidUrl }) {
     catch (e) { alert(e.message); } finally { setGenId(null); }
   };
   const releaseRetainage = async () => {
+    if (last && last.status === 'Draft') { alert('Pay app #' + last.applicationNumber + ' is still a Draft. Mark it Submitted (Edit) before releasing retainage.'); return; }
     const nextNo = (invs.reduce((m, a) => Math.max(m, a.applicationNumber), 0)) + 1;
-    if (!confirm('Release retainage?\n\nThis creates the final pay app (#' + nextNo + ') billing out the ' + fmt$(retHeld) + ' currently held. Work completed stays the same and retainage drops to zero, so the amount due on it is exactly the retainage held.')) return;
+    if (!confirm('Release retainage?\n\nThis creates the final pay app (#' + nextNo + ') billing out the ' + fmtC(retHeld) + ' currently held. Work completed stays the same and retainage drops to zero, so the amount due on it is exactly the retainage held.')) return;
     try { await api.send('POST', '/api/projects/' + p.id + '/release-retainage'); load(); } catch (e) { alert(e.message); }
   };
   const delInv = async a => {
@@ -444,10 +487,10 @@ function Detail({ id, user, onBack, bidUrl }) {
 
   const feed = [];
   hist.forEach(h => feed.push({ when: h.changedAt, t: 'Moved to ' + h.status, w: h.changedBy }));
-  invs.forEach(a => { const relTag = a.isRetainageRelease ? ' (retainage release)' : ''; if (a.submittedDate) feed.push({ when: a.submittedDate, t: 'Pay App #' + a.applicationNumber + relTag + ' submitted', open: { kind: 'payapp', data: a } }); if (a.paidDate) feed.push({ when: a.paidDate, t: 'Pay App #' + a.applicationNumber + relTag + ' paid ' + fmt$(a.amountPaid), open: { kind: 'payapp', data: a } }); });
+  invs.forEach(a => { const relTag = a.isRetainageRelease ? ' (retainage release)' : ''; if (a.submittedDate) feed.push({ when: a.submittedDate, t: 'Pay App #' + a.applicationNumber + relTag + ' submitted', open: { kind: 'payapp', data: a } }); if (a.paidDate) feed.push({ when: a.paidDate, t: 'Pay App #' + a.applicationNumber + relTag + ' paid ' + fmtC(a.amountPaid), open: { kind: 'payapp', data: a } }); });
   cos.forEach(c => { if (c.submittedDate) feed.push({ when: c.submittedDate, t: c.coNumber + ' ' + c.status + ' (' + fmt$(c.amount) + ')', open: { kind: 'co', data: c } }); });
   notes.forEach(n => feed.push({ when: n.createdAt, t: 'Note added', w: n.author, note: true, body: n.body }));
-  feed.sort((x, y) => new Date(y.when) - new Date(x.when));
+  feed.sort((x, y) => asDate(y.when) - asDate(x.when));
 
   const dchips = [['Award', p.awardDate], ['Projected start', p.projectedStartDate], ['Fab', p.fabStartDate], ['Galv send', p.galvSendDate], ['Galv return', p.galvReturnDate], ['Paint', p.paintSendDate]].filter(r => r[1]);
   const nextDel = (p.deliveries || []).filter(d => !d.done && d.date).sort((a, b) => a.date.localeCompare(b.date))[0];
@@ -458,7 +501,9 @@ function Detail({ id, user, onBack, bidUrl }) {
       <div>{p.jobNumber && <div className="joblabel">#{p.jobNumber}</div>}<h1>{p.name}</h1>
         <div className="muted" style={{ marginTop: 4 }}>{p.customer} · PM {p.pm || '—'}{p.awardDate ? ' · Awarded ' + fmtDate(p.awardDate) : ''}{p.sourceEstimateId ? <> · <a href={(bidUrl || BID_URL_FALLBACK).replace(/\/+$/, '') + '/#/estimate/' + p.sourceEstimateId} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--ac)', fontWeight: 600, textDecoration: 'none' }} title="Open the bid this job came from">Bid {p.sourceBidNumber || '#' + p.sourceEstimateId} in R&amp;R Bid ↗</a></> : null}</div>
         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}><span className="chip">Drawings: {p.drawingStatus || 'N/A'}</span><span className="chip" style={p.materialOrdered ? { color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' } : {}}>Material {p.materialOrdered ? 'ordered ✓' : 'not ordered'}</span>{setupBadge(p)}</div>
-        {p.needsSetup && <div className="note" style={{ marginTop: 8, color: '#b45309' }}>This job came in from the bid tool and still needs setting up. {eP ? 'Add the projected start date (and fab/delivery dates) to clear this.' : 'A PM or admin needs to add the projected start date.'}</div>}
+        {p.needsSetup && <div className="note" style={{ marginTop: 8, color: '#b45309' }}>This job came in from the bid tool and still needs setting up. {eP ? <>Add the projected start date (and fab/delivery dates) to clear this. <button className="btn-pri btn-sm" style={{ marginLeft: 6 }} onClick={() => setModal({ t: 'project', data: p })}>Set up job</button></> : 'A PM or admin needs to add the projected start date.'}</div>}
+        {startPassed(p) && <div className="note" style={{ marginTop: 8, color: '#b45309' }}>Projected start was {fmtDate(p.projectedStartDate)} and the job is still Awarded. Move it to its current stage, or push the date out.</div>}
+        {seeMoney && bidDiff && <div className="note" style={{ marginTop: 8, color: '#b45309' }}>R&amp;R Bid has different numbers for this job. {bidDiffText}{eP && <><button className="btn-ghost btn-sm" style={{ marginLeft: 8 }} onClick={useBidNumbers}>Use R&amp;R Bid numbers</button><button className="btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Hide this until the numbers in R&R Bid change again" onClick={keepOurNumbers}>Keep ours</button></>}</div>}
       </div>
       <div className="spacer" />
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{eP ? <select value={p.status} onChange={async e => { try { await api.send('PUT', '/api/projects/' + p.id, { ...p, status: e.target.value, expectedUpdatedAt: p.updatedAt }); } catch (er) { alert(er.message); } load(); }}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select> : statusPill(p.status)}{eP && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'project', data: p })}>Edit</button>}{eA && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={archive}>Archive</button>}</div>
@@ -469,13 +514,13 @@ function Detail({ id, user, onBack, bidUrl }) {
       {nextDel && <span className="dchip" style={daysUntil(nextDel.date) < 0 ? { borderColor: '#fecaca', background: '#fef2f2', color: '#ef4444' } : {}}>Next delivery: <b>{fmtDate(nextDel.date)}</b>{daysUntil(nextDel.date) < 0 ? ' · overdue' : ''}</span>}
     </div>
 
-    {seeMoney && <div className="card"><h3>Billing &amp; retainage (live){retHeld > 0.005 && <button className="btn-ghost btn-sm" onClick={releaseRetainage}>Release retainage</button>}</h3><div className="grid2">
-      <div className="kv"><div className="k">Contract sum</div><div className="v num">{fmt$(contractSum)}</div></div>
-      <div className="kv"><div className="k">Billed to date</div><div className="v num">{fmt$(billed)}</div></div>
-      <div className="kv"><div className="k">Retainage held</div><div className="v num">{fmt$(retHeld)}</div></div>
-      <div className="kv"><div className="k">Net paid</div><div className="v num">{fmt$(totalPaid)}</div></div>
-      <div className="kv"><div className="k">Balance to finish</div><div className="v num">{fmt$(contractSum - billed)}</div></div>
-      <div className="kv"><div className="k">Gross margin (estimate)</div><div className={'v num ' + gmColor(gm)}>{gm.toFixed(1)}%</div></div>
+    {seeMoney && <div className="card"><h3>Billing &amp; retainage (live){retHeld > 0.005 && eI && <button className="btn-ghost btn-sm" onClick={releaseRetainage}>Release retainage</button>}</h3><div className="grid2">
+      <div className="kv"><div className="k">Contract sum</div><div className="v num">{fmt$(contractSum)}</div><div className="muted" style={{ fontSize: 12 }}>{fmt$(p.sellPrice)} original{approvedCO ? ' + ' + fmt$(approvedCO) + ' approved C/O' : ''}{pendingCO ? ' · ' + fmt$(pendingCO) + ' pending' : ''}</div></div>
+      <div className="kv"><div className="k">Billed to date</div><div className="v num">{fmtC(billed)}</div>{drafts.length > 0 && <div className="muted" style={{ fontSize: 12, color: '#b45309' }}>Draft pay app{drafts.length === 1 ? ' #' + drafts[0].applicationNumber + ' is' : 's are'} not counted until submitted</div>}</div>
+      <div className="kv"><div className="k">Retainage held</div><div className="v num">{fmtC(retHeld)}</div></div>
+      <div className="kv"><div className="k">Collected</div><div className="v num">{fmtC(totalPaid)}</div>{owed > 0.005 && <div className="muted" style={{ fontSize: 12 }}>{fmtC(owed)} billed and not yet paid</div>}</div>
+      <div className="kv"><div className="k">{toFinish < -0.005 ? 'Billed over contract' : 'Left to bill'}</div><div className={'v num' + (toFinish < -0.005 ? ' r' : '')}>{fmtC(Math.abs(toFinish))}</div>{toFinish < -0.005 && <div className="muted" style={{ fontSize: 12 }}>Billed more than the contract sum. Check for sales tax or a missing change order.</div>}</div>
+      <div className="kv"><div className="k">Gross margin (estimate)</div><div className={'v num ' + gmColor(gm)}>{gm.toFixed(1)}%</div><div className="muted" style={{ fontSize: 12 }}>{fmt$(gp)} on {fmt$(estCost)} cost{approvedCOCost ? ' (incl. C/O cost)' : ''}</div></div>
       {p.shopHours != null && <div className="kv"><div className="k">Shop hours (ShopTrack)</div><div className="v num">{Number(p.shopHours).toLocaleString('en-US')} hrs</div>{p.shopLaborCost != null && <div className="muted" style={{ fontSize: 12 }}>{fmt$(p.shopLaborCost)} labor at straight time</div>}</div>}
       {p.actualCost != null && <><div className="kv"><div className="k">Actual cost to date</div><div className="v num">{fmt$(p.actualCost)}</div></div>
       <div className="kv"><div className="k">Actual margin</div><div className={'v num ' + gmColor(agm)}>{agm.toFixed(1)}%</div></div></>}</div></div>}
@@ -496,9 +541,11 @@ function Detail({ id, user, onBack, bidUrl }) {
     </div>
     </div>
 
-    {seeMoney && <div className="card"><h3>Pay applications {eI ? <><button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> {p.jobNumber && <button className="btn-ghost btn-sm" disabled={syncing} onClick={syncSov} title="Pull the schedule of values from the bid tool">{syncing ? 'Syncing…' : (sov.length ? 'Re-sync schedule from bid' : 'Sync schedule from bid')}</button>} {sov.length > 0 && <span className="note" style={{ marginLeft: 4 }}>{sov.length} SOV line{sov.length === 1 ? '' : 's'} · {fmt$(sov.reduce((s, l) => s + Number(l.scheduledValue || 0), 0))} scheduled</span>}</> : <span className="note">read-only</span>}</h3>
+    {seeMoney && <div className="card"><h3>Pay applications {eI ? <><button className="btn-pri btn-sm" onClick={() => setModal({ t: 'payapp' })}>+ Add pay app</button> {p.sourceEstimateId && <button className="btn-ghost btn-sm" disabled={syncing} onClick={syncSov} title="Pull the schedule of values from the bid tool">{syncing ? 'Syncing…' : (sovList.length ? 'Re-sync schedule from bid' : 'Sync schedule from bid')}</button>} {sovList.length > 0 && <span className="note" style={{ marginLeft: 4 }}>{sovList.length} SOV line{sovList.length === 1 ? '' : 's'} · {fmt$(sovTotal)} scheduled</span>}</> : <span className="note">read-only</span>}</h3>
+      {sovList.length > 0 && sovTotal < 0.5 && <div className="note" style={{ margin: '-4px 0 10px', color: '#b45309' }}>The schedule of values has no dollar amounts, so a pay app would bill $0. {p.sourceEstimateId ? 'Click Re-sync schedule from bid to pull the priced lines.' : 'Add the amounts in the pay app.'}</div>}
+      {sovList.length > 0 && sovTotal >= 0.5 && Math.abs(sovTotal - (Number(p.sellPrice) || 0)) >= 1 && <div className="note" style={{ margin: '-4px 0 10px', color: '#b45309' }}>The schedule of values adds up to {fmt$(sovTotal)} but the original contract is {fmt$(p.sellPrice)} ({fmt$(sovTotal - (Number(p.sellPrice) || 0))}). Fix the schedule in R&amp;R Bid and re-sync, or adjust a line on the pay app.</div>}
       {invs.length ? <table><thead><tr><th>App #</th><th>Period</th><th className="right">Completed to date</th><th className="right">Retainage</th><th className="right">This period</th><th className="right">Paid</th><th>Status</th><th /></tr></thead>
-        <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}{a.isRetainageRelease && <span className="chip" style={{ marginLeft: 6, color: '#0d9488', borderColor: '#99f6e4', background: '#f0fdfa' }}>Retainage release</span>}{(a.isFinal || a.isRetainageRelease) && <span className="chip" style={{ marginLeft: 6, color: '#b00020', borderColor: '#fecdd3', background: '#fff1f2' }}>Final</span>}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmt$(a.workCompletedToDate)}</td><td className="right num">{fmt$(a.retainageHeld)}</td><td className="right num">{fmt$(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmt$(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right" style={{ whiteSpace: 'nowrap' }}>{payAppDoc[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + payAppDoc[a.id].id + '/download'} title={payAppDoc[a.id].fileName}>📎 View pay app</a>} {genPdf[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + genPdf[a.id].id + '/download'} title={genPdf[a.id].fileName}>📄 G702 PDF</a>} {genXlsx[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + genXlsx[a.id].id + '/download'} title={genXlsx[a.id].fileName}>⬇ Excel</a>} {eI && <button className="btn-ghost btn-sm" disabled={genId === a.id} onClick={() => genPayApp(a)}>{genId === a.id ? 'Generating…' : (genXlsx[a.id] ? 'Re-generate G702/G703' : 'Generate G702/G703')}</button>} {eI && a.status !== 'Paid' && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>} {eI && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payapp', data: a })}>Edit</button>} {eI && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delInv(a)}>Delete</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
+        <tbody>{invs.map(a => <tr key={a.id}><td>#{a.applicationNumber}{a.isRetainageRelease && <span className="chip" style={{ marginLeft: 6, color: '#0d9488', borderColor: '#99f6e4', background: '#f0fdfa' }}>Retainage release</span>}{(a.isFinal || a.isRetainageRelease) && <span className="chip" style={{ marginLeft: 6, color: '#b00020', borderColor: '#fecdd3', background: '#fff1f2' }}>Final</span>}</td><td className="muted">{fmtDate(a.periodEnd)}</td><td className="right num">{fmtC(a.workCompletedToDate)}</td><td className="right num">{fmtC(a.retainageHeld)}</td><td className="right num">{fmtC(a.currentPaymentDue)}</td><td className={'right num ' + (a.amountPaid ? 'g' : '')}>{a.amountPaid ? fmtC(a.amountPaid) : '—'}</td><td>{payTag(a.status)}</td><td className="right" style={{ whiteSpace: 'nowrap' }}>{payAppDoc[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + payAppDoc[a.id].id + '/download'} title={payAppDoc[a.id].fileName}>📎 View pay app</a>} {genPdf[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + genPdf[a.id].id + '/download'} title={genPdf[a.id].fileName}>📄 G702 PDF</a>} {genXlsx[a.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none' }} href={'/api/documents/' + genXlsx[a.id].id + '/download'} title={genXlsx[a.id].fileName}>⬇ Excel</a>} {eI && <button className="btn-ghost btn-sm" disabled={genId === a.id} onClick={() => genPayApp(a)}>{genId === a.id ? 'Generating…' : (genXlsx[a.id] ? 'Re-generate G702/G703' : 'Generate G702/G703')}</button>} {eI && a.status !== 'Paid' && a.status !== 'Draft' && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payment', data: a })}>Record payment</button>} {eI && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'payapp', data: a })}>Edit</button>} {eI && <button className="btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={() => delInv(a)}>Delete</button>}</td></tr>)}</tbody></table> : <div className="empty">No pay apps yet.</div>}
     </div>}
 
 
@@ -507,10 +554,10 @@ function Detail({ id, user, onBack, bidUrl }) {
     </div>
 
     {modal && modal.t === 'project' && <ProjectModal initial={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
-    {modal && modal.t === 'co' && <CoModal projectId={id} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
-    {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} existing={modal.data} contractSum={contractSum} sov={sov} docs={docs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
+    {modal && modal.t === 'co' && <CoModal projectId={id} existing={modal.data} nextNumber={'CO-' + String(cos.reduce((m, c) => Math.max(m, parseInt(String(c.coNumber).replace(/\D/g, ''), 10) || 0), 0) + 1).padStart(3, '0')} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
+    {modal && modal.t === 'payapp' && <PayAppModal projectId={id} prevRows={invs} existing={modal.data} contractSum={contractSum} sov={sovList} docs={docs} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
     {modal && modal.t === 'payment' && <PaymentModal inv={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
-    {modal && modal.t === 'item' && <ItemModal item={modal.data} onClose={() => setModal(null)} />}
+    {modal && modal.t === 'item' && <ItemModal item={modal.data} onClose={() => setModal(null)} onEdit={eC && modal.data.kind === 'co' && (modal.data.data.fromBid ? ['Approved', 'Paid'].includes(modal.data.data.status) : true) ? c => setModal({ t: 'co', data: c }) : null} />}
     {modal && modal.t === 'seq' && <SequenceModal projectId={id} seq={modal.data} onClose={() => setModal(null)} onSaved={() => { setModal(null); load(); }} />}
   </div>;
 }
@@ -547,15 +594,23 @@ function SequenceModal({ projectId, seq, onClose, onSaved }) {
   </Modal>;
 }
 
-function CoModal({ projectId, onClose, onSaved }) {
-  const [c, setC] = useState({ coNumber: '', description: '', amount: '', status: 'Pending', submittedDate: today() });
+function CoModal({ projectId, existing, nextNumber, onClose, onSaved }) {
+  const editing = !!(existing && existing.id);
+  const fromBid = editing && existing.fromBid;
+  const [c, setC] = useState(editing
+    ? { coNumber: existing.coNumber || '', description: existing.description || '', amount: existing.amount ?? '', cost: existing.cost ?? '', status: existing.status, submittedDate: existing.submittedDate || '', approvedDate: existing.approvedDate || '', paidDate: existing.paidDate || '' }
+    : { coNumber: nextNumber || '', description: '', amount: '', cost: '', status: 'Pending', submittedDate: today(), approvedDate: '', paidDate: '' });
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
   const set = k => e => setC({ ...c, [k]: e.target.value });
+  // Moving the status fills in its date, so the activity feed and aging are right.
+  const setStatus = e => { const st = e.target.value; setC({ ...c, status: st, approvedDate: (st === 'Approved' || st === 'Paid') ? (c.approvedDate || today()) : c.approvedDate, paidDate: st === 'Paid' ? (c.paidDate || today()) : (st === 'Paid' ? c.paidDate : '') }); };
   const save = async () => {
+    if (!fromBid && !String(c.coNumber).trim()) { setErr('Give the change order a number'); return; }
     setBusy(true); setErr(null);
     try {
-      const r = await api.send('POST', '/api/projects/' + projectId + '/change-orders', c);
-      const coId = r && r.id;
+      let coId = editing ? existing.id : null;
+      if (editing) await api.send('PUT', '/api/change-orders/' + existing.id, c);
+      else { const r = await api.send('POST', '/api/projects/' + projectId + '/change-orders', c); coId = r && r.id; }
       if (file && coId) {
         const fd = new FormData(); fd.append('file', file); fd.append('category', 'co'); fd.append('changeOrderId', coId);
         const up = await fetch('/api/projects/' + projectId + '/documents', { method: 'POST', body: fd });
@@ -564,15 +619,26 @@ function CoModal({ projectId, onClose, onSaved }) {
       onSaved();
     } catch (e) { setErr(e.message); setBusy(false); }
   };
-  return <Modal onClose={onClose}><h2>Add change order</h2>
-    <div className="field"><label>C/O number</label><input value={c.coNumber} onChange={set('coNumber')} placeholder="CO-01" /></div>
-    <div className="field"><label>Description</label><input value={c.description} onChange={set('description')} /></div>
-    <div className="field"><label>Amount ($), negative for a credit</label><input type="number" value={c.amount} onChange={set('amount')} /></div>
-    <div className="field"><label>Status</label><select value={c.status} onChange={set('status')}>{CO_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
-    <div className="field"><label>Attach C/O copy (PDF sent to GC)</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} /></div>
-    <div className="note">Only Approved or Paid C/Os increase the contract sum.</div>
+  const del = async () => { if (!confirm('Delete change order ' + existing.coNumber + '?')) return; setBusy(true); try { await api.send('DELETE', '/api/change-orders/' + existing.id); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
+  if (fromBid) return <Modal onClose={onClose}><h2>Change order {existing.coNumber}</h2>
+    <div className="note" style={{ marginBottom: 10 }}>This change order comes from R&amp;R Bid ({fmt$(existing.amount)}). Its number, amount and approval follow the bid tool. Here you only record when it was paid.</div>
+    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, cursor: 'pointer' }}><input type="checkbox" checked={c.status === 'Paid'} onChange={e => setC({ ...c, status: e.target.checked ? 'Paid' : 'Approved', paidDate: e.target.checked ? (c.paidDate || today()) : '' })} /> Paid</label>
+    {c.status === 'Paid' && <div className="field" style={{ marginTop: 10 }}><label>Paid date</label><input type="date" value={c.paidDate} onChange={set('paidDate')} /></div>}
     {err && <div className="err">{err}</div>}
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save</button></div>
+  </Modal>;
+  const amt = parseFloat(c.amount), cst = parseFloat(c.cost);
+  return <Modal onClose={onClose}><h2>{editing ? 'Edit change order ' + existing.coNumber : 'Add change order'}</h2>
+    <div className="row2"><div className="field"><label>C/O number</label><input value={c.coNumber} onChange={set('coNumber')} placeholder="CO-001" /></div><div className="field"><label>Status</label><select value={c.status} onChange={setStatus}>{CO_STATUS.map(s => <option key={s}>{s}</option>)}</select></div></div>
+    <div className="field"><label>Description</label><input value={c.description} onChange={set('description')} /></div>
+    <div className="row2"><div className="field"><label>Amount ($), negative for a credit</label><NumInput pre="$" value={c.amount} onChange={v => setC({ ...c, amount: v })} /></div><div className="field"><label>Our cost ($), optional</label><NumInput pre="$" value={c.cost} onChange={v => setC({ ...c, cost: v })} placeholder="" /></div></div>
+    {!isNaN(amt) && amt !== 0 && !isNaN(cst) && <div className="note">Margin on this change order: {((amt - cst) / amt * 100).toFixed(1)}%</div>}
+    <div className="row2"><div className="field"><label>Submitted</label><input type="date" value={c.submittedDate} onChange={set('submittedDate')} /></div><div className="field"><label>Approved</label><input type="date" value={c.approvedDate} onChange={set('approvedDate')} /></div></div>
+    {c.status === 'Paid' && <div className="field"><label>Paid date</label><input type="date" value={c.paidDate} onChange={set('paidDate')} /></div>}
+    <div className="field"><label>{editing ? 'Attach another copy (PDF sent to GC)' : 'Attach C/O copy (PDF sent to GC)'}</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} /></div>
+    <div className="note">Only Approved or Paid C/Os increase the contract sum. Our cost is used in the job margin.</div>
+    {err && <div className="err">{err}</div>}
+    <div className="actions">{editing && <button className="btn-ghost" style={{ color: 'var(--r)' }} disabled={busy} onClick={del}>Delete</button>}<div className="spacer" /><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={save}>Save</button></div>
   </Modal>;
 }
 
@@ -584,7 +650,12 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
   const prevApp = before[before.length - 1];
   const prevELR = prevApp ? Number(prevApp.earnedLessRetainage) : 0;
   const prevCompleted = prevApp ? Number(prevApp.workCompletedToDate) : 0;
-  const useLines = (sov || []).length > 0;
+  const isRelease = editing && !!existing.isRetainageRelease;
+  // Line-by-line billing only when the job has a schedule of values AND this pay
+  // app was billed that way. A retainage release, or a pay app saved as one
+  // number before the schedule existed, stays a single number, so opening it to
+  // fix a date can never wipe its amount.
+  const [useLines, setUseLines] = useState(!isRelease && (sov || []).length > 0);
   const fromNum = n => (n == null || Number(n) === 0) ? '' : String(n);
   const num = v => parseFloat(v) || 0;
 
@@ -592,13 +663,14 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
     ? { applicationNumber: existing.applicationNumber, periodEnd: existing.periodEnd || '', workCompletedToDate: existing.workCompletedToDate, retainagePct: existing.retainagePct, status: existing.status, submittedDate: existing.submittedDate || '', approvedDate: existing.approvedDate || '', notes: existing.notes || '', amountPaid: existing.amountPaid || '', paidDate: existing.paidDate || '', isFinal: !!existing.isFinal }
     : { applicationNumber: appNo, periodEnd: '', workCompletedToDate: '', retainagePct: prevApp ? Number(prevApp.retainagePct) : 10, status: 'Draft', isFinal: false });
   const set = k => e => setA({ ...a, [k]: e.target.value });
+  const prevDraft = !editing && prevRows.find(x => x.status === 'Draft');
   // Standard retainage starts from this app if we're editing one, otherwise from
   // the previous app on the job, so a no-retainage job stays at 0 instead of
   // snapping back to 10% every time. fromNum() shows a real 0 as a blank box
   // with a 0 placeholder, and num('') reads it back as 0.
   const [lines, setLines] = useState([]);
   const [stdRet, setStdRet] = useState(fromNum(editing ? existing.retainagePct : (prevApp ? prevApp.retainagePct : 10)));
-  const [seeding, setSeeding] = useState(useLines);
+  const [seeding, setSeeding] = useState(!isRelease && (sov || []).length > 0);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [file, setFile] = useState(null);
   const keySeq = useRef(0); const mkKey = () => 'k' + (keySeq.current++);
 
@@ -609,7 +681,10 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
       try {
         let seeded = [];
         if (editing) {
-          const stored = await api.get('/api/invoices/' + existing.id + '/lines').catch(() => []);
+          const stored = await api.get('/api/invoices/' + existing.id + '/lines').catch(() => null);
+          // Could not read the lines: keep Save off rather than guess.
+          if (!Array.isArray(stored)) { if (alive) setErr('Could not load this pay app\'s lines. Close it and try again.'); return; }
+          if (!stored.length) { if (alive) { setUseLines(false); setSeeding(false); } return; }
           if (stored && stored.length) seeded = stored.map(l => ({ key: mkKey(), sovLineId: l.sovLineId || null, itemNo: l.itemNo || '', description: l.description || '', scheduledValue: fromNum(l.scheduledValue), percentComplete: fromNum(l.percentComplete), storedMaterials: fromNum(l.storedMaterials), retainagePct: fromNum(l.retainagePct), fromPrevious: Number(l.fromPrevious || 0) }));
         }
         if (!seeded.length) {
@@ -625,9 +700,9 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
 
   const lineCalc = l => { const sched = num(l.scheduledValue), pct = num(l.percentComplete), stored = num(l.storedMaterials), rp = num(l.retainagePct); const total = sched * pct / 100 + stored; return { sched, total, thisPeriod: total - Number(l.fromPrevious || 0), balance: sched - total, retainage: total * rp / 100 }; };
   const totals = lines.reduce((t, l) => { const c = lineCalc(l); t.sched += c.sched; t.work += c.total; t.ret += c.retainage; t.thisPeriod += c.thisPeriod; return t; }, { sched: 0, work: 0, ret: 0, thisPeriod: 0 });
-  const singleComp = num(a.workCompletedToDate), singleRet = singleComp * num(a.retainagePct) / 100;
+  const singleComp = num(a.workCompletedToDate), singleRet = Math.round(singleComp * num(a.retainagePct)) / 100;
   const work = useLines ? totals.work : singleComp, retTotal = useLines ? totals.ret : singleRet;
-  const elr = work - retTotal, due = elr - prevELR;
+  const elr = work - retTotal, due = Math.round((elr - prevELR) * 100) / 100;
 
   const updLine = (key, k, v) => setLines(ls => ls.map(l => l.key === key ? { ...l, [k]: v } : l));
   const addLine = () => setLines(ls => [...ls, { key: mkKey(), sovLineId: null, itemNo: '', description: '', scheduledValue: '', percentComplete: '', storedMaterials: '', retainagePct: stdRet, fromPrevious: 0 }]);
@@ -635,11 +710,15 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
   const applyRetAll = () => setLines(ls => ls.map(l => ({ ...l, retainagePct: stdRet })));
 
   const save = async () => {
+    if (a.status === 'Paid' && editing && !(num(a.amountPaid) > 0) && !confirm('This pay app is marked Paid with no amount paid, so it will not count in Collected.\n\nSave anyway? (Cancel, then enter the amount paid.)')) return;
     if (contractSum > 0 && work > contractSum + 0.005 && !confirm('Heads up: work completed to date (' + fmt$(work) + ') is more than the contract plus approved change orders (' + fmt$(contractSum) + ').\n\nSave anyway?')) return;
-    if (work < prevCompleted - 0.005 && !confirm('Heads up: work completed to date (' + fmt$(work) + ') is less than the previous pay app (' + fmt$(prevCompleted) + '). Cumulative billing normally only goes up.\n\nSave anyway?')) return;
+    if (!isRelease && work < prevCompleted - 0.005 && !confirm('Heads up: work completed to date (' + fmt$(work) + ') is less than the previous pay app (' + fmt$(prevCompleted) + '). Cumulative billing normally only goes up.\n\nSave anyway?')) return;
     setBusy(true); setErr(null);
     try {
       const payload = { ...a };
+      // Single-number edit that leaves the amount and rate alone keeps the
+      // retainage the app already had (it may have come from per-line rates).
+      if (!useLines && editing && existing.retainageHeld != null && num(a.workCompletedToDate) === Number(existing.workCompletedToDate) && num(a.retainagePct) === Number(existing.retainagePct)) payload.retainageHeld = existing.retainageHeld;
       if (useLines) { payload.retainagePct = num(stdRet); payload.lines = lines.map(l => ({ sovLineId: l.sovLineId || null, itemNo: l.itemNo, description: l.description, scheduledValue: num(l.scheduledValue), percentComplete: num(l.percentComplete), storedMaterials: num(l.storedMaterials), retainagePct: num(l.retainagePct) })); }
       let invId = editing ? existing.id : null;
       if (editing) await api.send('PUT', '/api/invoices/' + existing.id, payload);
@@ -658,8 +737,11 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
     <div className="row2">
       {editing && <div className="field"><label>App #</label><input type="number" value={a.applicationNumber} onChange={set('applicationNumber')} /></div>}
       <div className="field"><label>Period through</label><input type="date" value={a.periodEnd} onChange={set('periodEnd')} /></div>
-      <div className="field"><label>Status</label><select value={a.status} onChange={set('status')}>{PAYAPP_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
+      <div className="field"><label>Status</label><select value={a.status} onChange={e => { const st = e.target.value; const nx = { ...a, status: st }; if (st !== 'Draft' && !nx.submittedDate) nx.submittedDate = today(); if (st === 'Draft') nx.submittedDate = ''; if (st === 'Paid' && editing && !seeding && !(num(nx.amountPaid) > 0)) { nx.amountPaid = String(Math.max(0, Math.round(due * 100) / 100)); nx.paidDate = nx.paidDate || today(); } setA(nx); }}>{PAYAPP_STATUS.map(s => <option key={s}>{s}</option>)}</select></div>
+      {a.status !== 'Draft' && <div className="field"><label>Submitted</label><input type="date" value={a.submittedDate || ''} onChange={set('submittedDate')} /></div>}
     </div>
+    {prevDraft && <div className="note" style={{ color: '#b45309' }}>Pay app #{prevDraft.applicationNumber} is still a Draft. If it went to the GC, mark it Submitted first so the running totals are right.</div>}
+    {isRelease && <div className="note" style={{ margin: '8px 0' }}>This is the retainage release. It bills the retainage held on the earlier pay apps; completed to date stays at {fmtC(existing.workCompletedToDate)} and retainage is 0.</div>}
     {editing && <div className="row2"><div className="field"><label>Amount paid ($)</label><NumInput pre="$" value={a.amountPaid} onChange={v => setA({ ...a, amountPaid: v })} /></div><div className="field"><label>Paid date</label><input type="date" value={a.paidDate} onChange={set('paidDate')} /></div></div>}
     <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 2px', fontSize: 13, cursor: 'pointer' }}><input type="checkbox" checked={!!a.isFinal} onChange={e => setA({ ...a, isFinal: e.target.checked })} /> Final application <span className="note">(prints “FINAL APPLICATION” on the G702)</span></label>
 
@@ -697,14 +779,14 @@ function PayAppModal({ projectId, prevRows, existing, contractSum, sov, docs, on
         <span className="note">Contract re-foots to {fmt$(totals.sched)}{Math.abs(totals.sched - contractSum) > 0.5 ? '  (job contract sum ' + fmt$(contractSum) + ')' : ''}</span>
       </div>
     </> : <>
-      <div className="note" style={{ margin: '10px 0' }}>No schedule of values on this job yet. Enter a single completed-to-date, or use “Sync schedule from bid” on the pay-app card to bill line by line.</div>
-      <div className="row2">
+      {!isRelease && <div className="note" style={{ margin: '10px 0' }}>{(sov || []).length ? 'This pay app was billed as one number, so it stays that way. New pay apps bill line by line from the schedule.' : 'No schedule of values on this job yet. Enter a single completed-to-date, or use “Sync schedule from bid” on the pay-app card to bill line by line.'}</div>}
+      {!isRelease && <div className="row2">
         <div className="field"><label>Work completed &amp; stored to date</label><NumInput pre="$" value={a.workCompletedToDate} onChange={v => setA({ ...a, workCompletedToDate: v })} /></div>
         <div className="field"><label>Retainage</label><NumInput suf="%" value={a.retainagePct} onChange={v => setA({ ...a, retainagePct: v })} /></div>
-      </div>
+      </div>}
     </>}
 
-    <div className="calc" style={{ marginTop: 12 }}><div><span>Completed to date</span><span className="num">{fmt$(work)}</span></div><div><span>Less retainage</span><span className="num">- {fmt$(retTotal)}</span></div><div><span>Earned less retainage</span><span className="num">{fmt$(elr)}</span></div><div><span>Less previous billings</span><span className="num">- {fmt$(prevELR)}</span></div><div className="tot"><span>This period (current payment due)</span><span className="num">{fmt$(due)}</span></div></div>
+    <div className="calc" style={{ marginTop: 12 }}><div><span>Completed to date</span><span className="num">{fmtC(work)}</span></div><div><span>Less retainage</span><span className="num">- {fmtC(retTotal)}</span></div><div><span>Earned less retainage</span><span className="num">{fmtC(elr)}</span></div><div><span>Less previous billings</span><span className="num">- {fmtC(prevELR)}</span></div><div className="tot"><span>This period (current payment due)</span><span className="num">{fmtC(due)}</span></div></div>
 
     <div className="field" style={{ marginTop: 10 }}><label>Notes</label><input value={a.notes || ''} onChange={set('notes')} /></div>
     <div className="field" style={{ marginTop: 6 }}><label>Attach signed pay app copy (PDF sent to GC)</label><input type="file" onChange={e => setFile(e.target.files[0] || null)} />{existingDoc && <div className="note" style={{ marginTop: 6 }}>Attached: <a href={'/api/documents/' + existingDoc.id + '/download'} style={{ color: 'var(--ac)' }}>{existingDoc.fileName}</a>{file ? '. Saving will replace it.' : ''}</div>}</div>
@@ -721,7 +803,7 @@ function PaymentModal({ inv, onClose, onSaved }) {
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
   const save = async () => { setBusy(true); setErr(null); try { await api.send('POST', '/api/invoices/' + inv.id + '/payment', { amountPaid: amt, paidDate: date }); onSaved(); } catch (e) { setErr(e.message); setBusy(false); } };
   return <Modal onClose={onClose}><h2>Record payment: Pay App #{inv.applicationNumber}</h2>
-    <div className="calc"><div><span>Payment due</span><span className="num">{fmt$(due)}</span></div><div><span>Already received</span><span className="num">{fmt$(already)}</span></div><div className="tot"><span>Remaining</span><span className="num">{fmt$(remaining)}</span></div></div>
+    <div className="calc"><div><span>Payment due</span><span className="num">{fmtC(due)}</span></div><div><span>Already received</span><span className="num">{fmtC(already)}</span></div><div className="tot"><span>Remaining</span><span className="num">{fmtC(remaining)}</span></div></div>
     <div className="field" style={{ marginTop: 12 }}><label>Amount received ($)</label><input type="number" value={amt} onChange={e => setAmt(e.target.value)} /></div>
     <div className="field"><label>Payment date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} /></div>
     <div className="note">Payments add up. Anything short of the amount due marks the app Partially Paid; record the rest later the same way.</div>
@@ -744,7 +826,7 @@ function Billing({ onOpen }) {
   const mt = d.marginTotals || { contractSum: 0, cost: 0, marginDollars: 0, marginPct: 0 };
   const exportOpen = () => downloadCsv('receivables.csv', [['Job #', 'Project', 'Customer', 'Pay app', 'Status', 'Submitted', 'Days outstanding', 'This period', 'Amount due'], ...d.open.map(o => [o.jobNumber, o.name, o.customer, o.applicationNumber, o.status, o.submittedDate, o.days, o.thisPeriod, o.due])]);
   const exportRet = () => downloadCsv('retainage-outstanding.csv', [['Job #', 'Project', 'Customer', 'Status', 'Last pay app', 'Days held', 'Retainage held'], ...ret.map(r => [r.jobNumber, r.name, r.customer, r.status, r.lastAppDate, r.daysHeld, r.amount])]);
-  const exportMargin = () => downloadCsv('margin.csv', [['Job #', 'Project', 'Customer', 'Status', 'Contract sum', 'Cost', 'Margin $', 'Margin %'], ...margin.map(m => [m.jobNumber, m.name, m.customer, m.status, m.contractSum, m.cost, m.marginDollars, m.marginPct.toFixed(1)]), ['', 'Totals', '', '', mt.contractSum, mt.cost, mt.marginDollars, mt.marginPct.toFixed(1)]]);
+  const exportMargin = () => downloadCsv('margin.csv', [['Job #', 'Project', 'Customer', 'Status', 'Contract sum', 'Cost incl. C/O', 'Margin $', 'Margin %'], ...margin.map(m => [m.jobNumber, m.name, m.customer, m.status, m.contractSum, m.cost, m.marginDollars, m.marginPct.toFixed(1)]), ['', 'Totals', '', '', mt.contractSum, mt.cost, mt.marginDollars, mt.marginPct.toFixed(1)]]);
   return <div className="wrap">
     <h1 style={{ fontSize: 22, margin: '12px 0' }}>Billing &amp; receivables</h1>
     <div className="stats">
@@ -754,19 +836,21 @@ function Billing({ onOpen }) {
       <div className="stat"><div className="l">Overdue (&gt;{d.netDays}d)</div><div className={'v num ' + (d.overdue ? 'r' : '')}>{fmtK(d.overdue)}</div></div>
       <div className="stat"><div className="l">Retainage held</div><div className="v num">{fmtK(d.retainageHeld)}</div></div>
     </div>
-    <div className="card"><h3>Awaiting payment <button className="btn-ghost btn-sm" onClick={exportOpen}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Status</th><th>Submitted</th><th>Outstanding for</th><th className="right">This period</th><th className="right">Amount due</th></tr></thead><tbody>{d.open.length ? d.open.map((o, i) => <tr key={i} className="row" onClick={() => o.projectId && onOpen(o.projectId)}><td>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}<b>{o.name}</b></td><td>#{o.applicationNumber}{o.isRetainageRelease && relChip}</td><td>{payTag(o.status)}</td><td className="muted">{fmtDate(o.submittedDate)}</td><td className={o.overdue ? 'r' : 'num'}>{o.days} days{o.overdue ? ' · OVERDUE' : ''}</td><td className="right num">{fmt$(o.thisPeriod)}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(o.due)}</td></tr>) : <tr><td colSpan="7" className="empty">Nothing outstanding.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>Awaiting payment <button className="btn-ghost btn-sm" onClick={exportOpen}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Status</th><th>Submitted</th><th>Outstanding for</th><th className="right">This period</th><th className="right">Amount due</th></tr></thead><tbody>{d.open.length ? d.open.map((o, i) => <tr key={i} className="row" onClick={() => o.projectId && onOpen(o.projectId)}><td>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}<b>{o.name}</b></td><td>#{o.applicationNumber}{o.isRetainageRelease && relChip}</td><td>{payTag(o.status)}</td><td className="muted">{o.submittedDate ? fmtDate(o.submittedDate) : <span className="flag">no date</span>}</td><td className={o.overdue ? 'r' : 'num'}>{o.noDate ? <span className="flag">unknown, add the submitted date</span> : <>{o.days} day{o.days === 1 ? '' : 's'}{o.overdue ? ' · OVERDUE' : ''}</>}</td><td className="right num">{fmtC(o.thisPeriod)}</td><td className="right num" style={{ fontWeight: 700 }}>{fmtC(o.due)}</td></tr>) : <tr><td colSpan="7" className="empty">Nothing outstanding.</td></tr>}</tbody></table></div>
     <div className="card"><h3>Receivables by customer</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Grouped by customer. Click any project to open it.</div><table><thead><tr><th>Customer / project</th><th>Pay app</th><th className="right">Outstanding</th></tr></thead><tbody>{custKeys.length ? custKeys.map((k, ci) => [
-      <tr key={'c' + ci} style={{ background: '#f8f9fb' }}><td style={{ fontWeight: 800 }}>{k}</td><td /><td className="right num" style={{ fontWeight: 800 }}>{fmt$(custGroups[k].total)}</td></tr>,
-      ...custGroups[k].rows.map((o, ri) => <tr key={'c' + ci + 'r' + ri} className="row" onClick={() => o.projectId && onOpen(o.projectId)}><td style={{ paddingLeft: 28 }}>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}{o.name}</td><td>#{o.applicationNumber}{o.isRetainageRelease && relChip}</td><td className="right num">{fmt$(o.due)}</td></tr>),
-    ]) : <tr><td colSpan="3" className="empty">Nothing outstanding.</td></tr>}</tbody>{custKeys.length > 0 && <tfoot><tr><td>Total</td><td /><td className="right num">{fmt$(d.outstanding)}</td></tr></tfoot>}</table></div>
-    <div className="card"><h3>Retainage outstanding <button className="btn-ghost btn-sm" onClick={exportRet}>Export CSV</button></h3><div className="note" style={{ margin: '-4px 0 10px' }}>Every job still holding retainage, oldest first. Completed jobs listed here are waiting on their final release.</div><table><thead><tr><th>Project</th><th>Customer</th><th>Status</th><th>Last pay app</th><th>Held for</th><th className="right">Retainage held</th></tr></thead><tbody>{ret.length ? ret.map((r, i) => <tr key={i} className="row" onClick={() => r.projectId && onOpen(r.projectId)}><td>{r.jobNumber && <span className="joblabel">#{r.jobNumber} </span>}<b>{r.name}</b></td><td className="muted">{r.customer}</td><td>{statusPill(r.status)}</td><td className="muted">{fmtDate(r.lastAppDate)}</td><td className="num">{r.daysHeld} days</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(r.amount)}</td></tr>) : <tr><td colSpan="6" className="empty">No retainage held anywhere.</td></tr>}</tbody></table></div>
-    <div className="card"><h3>Margin (active jobs) <button className="btn-ghost btn-sm" onClick={exportMargin}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Status</th><th className="right">Contract sum</th><th className="right">Cost</th><th className="right">Margin $</th><th className="right">Margin %</th></tr></thead><tbody>{margin.length ? margin.map((m, i) => <tr key={i} className="row" onClick={() => m.projectId && onOpen(m.projectId)}><td>{m.jobNumber && <span className="joblabel">#{m.jobNumber} </span>}<b>{m.name}</b><div className="muted" style={{ fontSize: 12 }}>{m.customer}</div></td><td>{statusPill(m.status)}</td><td className="right num">{fmt$(m.contractSum)}</td><td className="right num">{fmt$(m.cost)}</td><td className="right num">{fmt$(m.marginDollars)}</td><td className={'right num ' + gmColor(m.marginPct)}>{m.marginPct.toFixed(1)}%</td></tr>) : <tr><td colSpan="6" className="empty">No active jobs.</td></tr>}</tbody>{margin.length > 0 && <tfoot><tr><td>Totals</td><td /><td className="right num">{fmt$(mt.contractSum)}</td><td className="right num">{fmt$(mt.cost)}</td><td className="right num">{fmt$(mt.marginDollars)}</td><td className={'right num ' + gmColor(mt.marginPct)}>{mt.marginPct.toFixed(1)}%</td></tr></tfoot>}</table></div>
-    <div className="card"><h3>Payment history (paid)</h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Paid date</th><th className="right">Amount paid</th></tr></thead><tbody>{d.paidHist.length ? d.paidHist.map((h, i) => <tr key={i} className="row" onClick={() => h.projectId && onOpen(h.projectId)}><td>{h.jobNumber && <span className="joblabel">#{h.jobNumber} </span>}<b>{h.name}</b></td><td>#{h.applicationNumber}{h.isRetainageRelease && relChip}</td><td className="muted">{fmtDate(h.paidDate)}</td><td className="right num g" style={{ fontWeight: 700 }}>{fmt$(h.amountPaid)}</td></tr>) : <tr><td colSpan="4" className="empty">No payments recorded yet.</td></tr>}</tbody></table></div>
+      <tr key={'c' + ci} style={{ background: '#f8f9fb' }}><td style={{ fontWeight: 800 }}>{k}</td><td /><td className="right num" style={{ fontWeight: 800 }}>{fmtC(custGroups[k].total)}</td></tr>,
+      ...custGroups[k].rows.map((o, ri) => <tr key={'c' + ci + 'r' + ri} className="row" onClick={() => o.projectId && onOpen(o.projectId)}><td style={{ paddingLeft: 28 }}>{o.jobNumber && <span className="joblabel">#{o.jobNumber} </span>}{o.name}</td><td>#{o.applicationNumber}{o.isRetainageRelease && relChip}</td><td className="right num">{fmtC(o.due)}</td></tr>),
+    ]) : <tr><td colSpan="3" className="empty">Nothing outstanding.</td></tr>}</tbody>{custKeys.length > 0 && <tfoot><tr><td>Total</td><td /><td className="right num">{fmtC(d.outstanding)}</td></tr></tfoot>}</table></div>
+    <div className="card"><h3>Retainage outstanding <button className="btn-ghost btn-sm" onClick={exportRet}>Export CSV</button></h3><div className="note" style={{ margin: '-4px 0 10px' }}>Every job still holding retainage, oldest first. Completed jobs listed here are waiting on their final release.</div><table><thead><tr><th>Project</th><th>Customer</th><th>Status</th><th>Last pay app</th><th>Held for</th><th className="right">Retainage held</th></tr></thead><tbody>{ret.length ? ret.map((r, i) => <tr key={i} className="row" onClick={() => r.projectId && onOpen(r.projectId)}><td>{r.jobNumber && <span className="joblabel">#{r.jobNumber} </span>}<b>{r.name}</b></td><td className="muted">{r.customer}</td><td>{statusPill(r.status)}</td><td className="muted">{fmtDate(r.lastAppDate)}</td><td className="num">{r.daysHeld} days</td><td className="right num" style={{ fontWeight: 700 }}>{fmtC(r.amount)}</td></tr>) : <tr><td colSpan="6" className="empty">No retainage held anywhere.</td></tr>}</tbody></table></div>
+    <div className="card"><h3>Margin (active jobs, estimate) <button className="btn-ghost btn-sm" onClick={exportMargin}>Export CSV</button></h3><table><thead><tr><th>Project</th><th>Status</th><th className="right">Contract sum</th><th className="right">Cost (incl. C/O)</th><th className="right">Margin $</th><th className="right">Margin %</th></tr></thead><tbody>{margin.length ? margin.map((m, i) => <tr key={i} className="row" onClick={() => m.projectId && onOpen(m.projectId)}><td>{m.jobNumber && <span className="joblabel">#{m.jobNumber} </span>}<b>{m.name}</b><div className="muted" style={{ fontSize: 12 }}>{m.customer}</div></td><td>{statusPill(m.status)}</td><td className="right num">{fmt$(m.contractSum)}</td><td className="right num">{fmt$(m.cost)}</td><td className="right num">{fmt$(m.marginDollars)}</td><td className={'right num ' + gmColor(m.marginPct)}>{m.marginPct.toFixed(1)}%</td></tr>) : <tr><td colSpan="6" className="empty">No active jobs.</td></tr>}</tbody>{margin.length > 0 && <tfoot><tr><td>Totals</td><td /><td className="right num">{fmt$(mt.contractSum)}</td><td className="right num">{fmt$(mt.cost)}</td><td className="right num">{fmt$(mt.marginDollars)}</td><td className={'right num ' + gmColor(mt.marginPct)}>{mt.marginPct.toFixed(1)}%</td></tr></tfoot>}</table></div>
+    <div className="card"><h3>Payment history (paid)</h3><table><thead><tr><th>Project</th><th>Pay app</th><th>Paid date</th><th className="right">Amount paid</th></tr></thead><tbody>{d.paidHist.length ? d.paidHist.map((h, i) => <tr key={i} className="row" onClick={() => h.projectId && onOpen(h.projectId)}><td>{h.jobNumber && <span className="joblabel">#{h.jobNumber} </span>}<b>{h.name}</b></td><td>#{h.applicationNumber}{h.isRetainageRelease && relChip}</td><td className="muted">{fmtDate(h.paidDate)}</td><td className="right num g" style={{ fontWeight: 700 }}>{fmtC(h.amountPaid)}</td></tr>) : <tr><td colSpan="4" className="empty">No payments recorded yet.</td></tr>}</tbody></table></div>
     <div className="card"><h3>May need billing</h3><div className="note" style={{ margin: '-4px 0 10px' }}>Jobs where the contract is ahead of what has been billed. Completed jobs are included, since finishing the steel does not mean the job is fully billed.</div><table><thead><tr><th>Project</th><th>Status</th><th>Last billed</th><th className="right">Unbilled work</th></tr></thead><tbody>{d.needsBilling.length ? d.needsBilling.map((n, i) => <tr key={i} className="row" onClick={() => n.projectId && onOpen(n.projectId)}><td>{n.jobNumber && <span className="joblabel">#{n.jobNumber} </span>}<b>{n.name}</b></td><td>{statusPill(n.status)}</td><td className="muted">{n.lastBilled ? fmtDate(n.lastBilled) : 'never billed'}</td><td className="right num" style={{ fontWeight: 700 }}>{fmt$(n.unbilled)}</td></tr>) : <tr><td colSpan="4" className="empty">No jobs with unbilled work.</td></tr>}</tbody></table></div>
   </div>;
 }
 
 const WHATS_NEW = [
+  { v: 'v1.12', date: 'September 16, 2026', title: 'Job-by-job checkup: numbers that add up, fewer dead ends',
+    body: 'No contract, cost, pay app, change order or schedule you entered is changed by this update. ShopTrack hours now reach the jobs: ShopTrack writes job numbers like p136 and the tracker writes P-136, so nothing matched before; dashes, spaces and capitals are now ignored when matching. Change orders can be edited: open one and click Edit to change its status, dates or amount, add our cost, or delete it. A change order from R&R Bid can be marked Paid here; everything else about it still follows R&R Bid, which now also sends its cost. Margin counts the cost of approved change orders, so extra work no longer shows as pure profit. The Projects list, Active value and Awarded backlog now use the contract sum (original plus approved change orders), in whole dollars instead of $1K, and Avg gross margin shows a dash instead of a red 0% when nothing is in production. Clicking a job that still needs setup opens the job; use Set start or the Set up job button to fill in the dates. Jobs still Awarded after their projected start date are flagged. The PM box shows Not assigned instead of looking like Joe Jenkins when nobody is picked. On the job page: Billed to date and Retainage held skip Draft pay apps (they have not gone to the GC yet) and say so, Net paid is now Collected with what is still owed, Balance to finish is Left to bill and turns red as Billed over contract when billing passes the contract, pay app money shows cents, and dates in the activity list no longer show a day early. If R&R Bid now has a different contract or cost for the job, the job page says so and offers Use R&R Bid numbers or Keep ours; nothing changes until you click one, and Keep ours stays quiet until the bid changes again. Dates filled in automatically use today where you are, not tomorrow after 8 PM. A schedule of values with no dollar amounts, or one that does not add up to the contract, is called out on the pay app card, and Sync schedule from bid only shows on jobs that came from a bid. Pay apps: opening a retainage release, or a pay app billed as one number, to fix a date no longer risks resetting its amount to zero; marking one Paid fills in the amount due and today\'s date; Record payment is hidden on Drafts; retainage release waits until the last pay app is submitted; retainage is kept to the cent. Billing page: pay apps with no submitted date are listed first and flagged instead of showing 0 days, and May need billing ignores differences under a dollar.' },
   { v: 'v1.11', date: 'September 16, 2026', title: 'Shop hours from ShopTrack on every job',
     body: 'Nothing you entered changes. Each job now shows the shop hours logged against it in ShopTrack, and the labor cost those hours add up to at straight time, refreshed every night and whenever the job is opened from R&R Bid. Jobs are matched on job number, so a job only picks up hours when ShopTrack uses the same number. It sits in the Billing & retainage card, so it shows for the same people who see billing. Actual cost to date is still the number you type; ShopTrack labor is shown next to it as a guide.' },
   { v: 'v1.10', date: 'September 16, 2026', title: 'Change orders and actual cost now flow with R&R Bid',
@@ -909,7 +993,7 @@ const HOWTOS = [
   { k: 'filter', need: () => true, title: 'Filter by date or PM', steps: ['Pick a PM, or use the date filter to choose Award, Projected start, Delivery, or Completed and a from/to range.', 'Search by name, customer, or job number any time.'] },
   { k: 'stage', need: r => can.editProject(r), title: 'Move a job to the next stage', steps: ['Use the status dropdown on the list or the project page.', 'It is stamped into the activity feed with your name and date.'] },
   { k: 'note', need: () => true, title: 'Add a note', steps: ['Open the job and use Notes & conversation.', 'Type and Add; it shows who wrote it and appears in the activity feed.'] },
-  { k: 'co', need: r => can.editCO(r), title: 'Add a change order', steps: ['Open the job, find Change orders, click + Add C/O.', 'Approved or Paid change orders raise the contract sum.'] },
+  { k: 'co', need: r => can.editCO(r), title: 'Add or update a change order', steps: ['Open the job, find Change orders, click + Add C/O. Add our cost if you know it; it is used in the margin.', 'To approve one, mark it paid, or fix it, click it and then Edit. Change orders from R&R Bid are approved there; here you only mark them Paid.', 'Approved or Paid change orders raise the contract sum.'] },
   { k: 'payapp', need: r => can.editPayApp(r), title: 'Add a pay application & record payment', steps: ['Open the job, Pay applications, + Add pay app; enter completed-to-date and retainage.', 'On an unpaid pay app, click Record payment.'] },
   { k: 'doc', need: () => true, title: 'Upload or download a document', steps: ['Open the job, find Documents.', 'Click + Upload, or Download next to any file.'] },
   { k: 'notif', need: () => true, title: 'Choose which emails you get', steps: ['Open Settings from the left ribbon.', 'Tick the events you want under My notifications and click Save. Leave everything unticked to get none.'] },

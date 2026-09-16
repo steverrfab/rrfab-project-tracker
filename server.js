@@ -199,6 +199,7 @@ app.post('/api/integration/won-job', async (req, res) => {
   } finally {
     client.release();
   }
+  recordBidNumbers([j]).catch(e => console.error('[won-job] recording bid numbers failed:', e.message));
   if (!newId) return res.json({ ok: true, created: false, job_number: jobNo, message: 'already in the tracker' });
   notifyNewProject({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount })
     .catch(e => console.error('[notify] failed:', e.message));
@@ -302,13 +303,14 @@ async function upsertBidChangeOrder(client, c) {
   if (!proj && c.estimate_id) proj = (await client.query('SELECT id FROM projects WHERE source_estimate_id = $1 ORDER BY is_archived, created_at LIMIT 1', [c.estimate_id])).rows[0];
   if (!proj) return { result: 'no-project' };
   const r = await client.query(
-    `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, source_co_id)
-     VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, CASE WHEN $5 = 'Approved' THEN CURRENT_DATE END, $6)
+    `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, source_co_id, cost)
+     VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, CASE WHEN $5 = 'Approved' THEN CURRENT_DATE END, $6, $7)
      ON CONFLICT (source_co_id) WHERE source_co_id IS NOT NULL DO UPDATE SET
        project_id = CASE WHEN change_orders.status = 'Paid' THEN change_orders.project_id ELSE EXCLUDED.project_id END,
        co_number = CASE WHEN change_orders.status = 'Paid' THEN change_orders.co_number ELSE EXCLUDED.co_number END,
        description = CASE WHEN change_orders.status = 'Paid' THEN change_orders.description ELSE EXCLUDED.description END,
        amount = CASE WHEN change_orders.status = 'Paid' THEN change_orders.amount ELSE EXCLUDED.amount END,
+       cost = CASE WHEN change_orders.status = 'Paid' THEN change_orders.cost ELSE COALESCE(EXCLUDED.cost, change_orders.cost) END,
        status = CASE WHEN change_orders.status = 'Paid' THEN 'Paid' ELSE EXCLUDED.status END,
        submitted_date = COALESCE(change_orders.submitted_date, CURRENT_DATE),
        approved_date = CASE
@@ -316,7 +318,7 @@ async function upsertBidChangeOrder(client, c) {
          WHEN EXCLUDED.status = 'Approved' THEN COALESCE(change_orders.approved_date, CURRENT_DATE)
          ELSE NULL END
      RETURNING (xmax = 0) AS inserted`,
-    [proj.id, String(c.co_number || 'CO').slice(0, 60), d(c.title), money(c.amount) || 0, c.status, coId]);
+    [proj.id, String(c.co_number || 'CO').slice(0, 60), d(c.title), money(c.amount) || 0, c.status, coId, c.cost == null ? null : money(c.cost)]);
   return { result: r.rows[0] && r.rows[0].inserted ? 'added' : 'updated', projectId: proj.id };
 }
 
@@ -338,21 +340,25 @@ app.post('/api/integration/change-order', async (req, res) => {
 
 // ====== SHOP LABOR FROM SHOPTRACK ======
 // ShopTrack (shop.rrfabrication.org) logs hours per job. The sync copies each
-// job's total hours and labor cost onto the matching project here (matched on
-// job number, case and spaces ignored). Read-only on the ShopTrack side.
+// job's total hours and labor cost onto the matching project here. Job numbers
+// are matched on letters and digits only, so ShopTrack's "p136" matches the
+// tracker's "P-136". If ShopTrack has the same job twice ("P122" and "p122"),
+// both count. Read-only on the ShopTrack side.
 // Needs SHOPTRACK_URL and SHOPTRACK_KEY; without them this does nothing.
 function shopConfig() {
   const base = (process.env.SHOPTRACK_URL || '').replace(/\/+$/, '');
   const key = process.env.SHOPTRACK_KEY || '';
   return base && key ? { base, key } : null;
 }
-async function fetchShopLabor(jobNumber, timeoutMs) {
+const jobKey = v => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]/g, '');
+async function fetchShopLabor(timeoutMs) {
   const cfg = shopConfig();
   if (!cfg) return null;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || 20000);
   try {
-    const r = await fetch(cfg.base + '/api/integration/job-labor' + (jobNumber ? '?job_number=' + encodeURIComponent(jobNumber) : ''),
+    // Always the full list (it is small), so the match can ignore dashes.
+    const r = await fetch(cfg.base + '/api/integration/job-labor',
       { headers: { 'X-Integration-Key': cfg.key }, signal: ctrl.signal });
     if (!r.ok) throw new Error('ShopTrack refused the labor request (status ' + r.status + ')');
     const j = await r.json();
@@ -360,21 +366,54 @@ async function fetchShopLabor(jobNumber, timeoutMs) {
     return j.jobs;
   } finally { clearTimeout(timer); }
 }
-async function saveShopLabor(jobs) {
-  let matched = 0;
+async function saveShopLabor(jobs, onlyJobNumber) {
+  const byKey = new Map();
   for (const s of jobs) {
-    const r = await pool.query(
-      `UPDATE projects SET shop_hours = $1, shop_labor_cost = $2, shop_synced_at = now()
-        WHERE lower(trim(job_number)) = lower(trim($3))`,
-      [money(s.hours) || 0, money(s.labor_cost) || 0, String(s.job_number || '')]);
-    matched += r.rowCount;
+    const k = jobKey(s.job_number);
+    if (!k) continue;
+    const t = byKey.get(k) || { hours: 0, cost: 0 };
+    t.hours += Number(s.hours) || 0; t.cost += Number(s.labor_cost) || 0;
+    byKey.set(k, t);
   }
-  return matched;
+  const projects = (await pool.query("SELECT id, job_number FROM projects WHERE job_number IS NOT NULL AND job_number <> ''")).rows;
+  const want = onlyJobNumber ? jobKey(onlyJobNumber) : null;
+  let matched = 0;
+  const unmatched = new Set(byKey.keys());
+  for (const p of projects) {
+    const k = jobKey(p.job_number);
+    if (want && k !== want) continue;
+    const t = byKey.get(k);
+    if (!t) continue;
+    unmatched.delete(k);
+    await pool.query('UPDATE projects SET shop_hours = $1, shop_labor_cost = $2, shop_synced_at = now() WHERE id = $3',
+      [Math.round(t.hours * 10) / 10, Math.round(t.cost * 100) / 100, p.id]);
+    matched++;
+  }
+  return { matched, unmatched: want ? [] : [...unmatched] };
 }
 async function syncShopLabor(jobNumber, timeoutMs) {
-  const jobs = await fetchShopLabor(jobNumber, timeoutMs);
+  const jobs = await fetchShopLabor(timeoutMs);
   if (!jobs) return { skipped: 'ShopTrack not configured' };
-  return { jobs: jobs.length, matched: await saveShopLabor(jobs) };
+  const r = await saveShopLabor(jobs, jobNumber);
+  return { jobs: jobs.length, matched: r.matched, unmatched: r.unmatched.length };
+}
+
+// ====== WHAT R&R BID SAYS EACH JOB IS WORTH ======
+// The tracker keeps its own contract and cost (people can change them here).
+// The sync records R&R Bid's current numbers next to them so the job page can
+// point out a difference and offer to match. It never overwrites them.
+async function recordBidNumbers(jobs) {
+  let n = 0;
+  for (const j of jobs || []) {
+    const jobNo = String(j.job_number || '').trim();
+    if (!jobNo) continue;
+    const r = await pool.query(
+      `UPDATE projects SET bid_contract = $1, bid_cost = $2, bid_checked_at = now()
+        WHERE (source_estimate_id = $3 OR job_number = $4)`,
+      [money(j.contract_amount), money(j.cost), j.estimate_id || -1, jobNo]);
+    n += r.rowCount;
+  }
+  return n;
 }
 
 // ====== ONE JOB'S STATUS, FOR THE BID TOOL'S PROJECT TAB ======
@@ -399,7 +438,7 @@ app.get('/api/integration/job-status', async (req, res) => {
     }
     const cos = (await pool.query('SELECT status, amount FROM change_orders WHERE project_id = $1', [p.id])).rows;
     const inv = invoiceRows((await pool.query('SELECT * FROM invoices WHERE project_id = $1', [p.id])).rows);
-    const last = inv[inv.length - 1];
+    const last = lastSent(inv);
     const approved = approvedCoTotal(cos);
     const pending = cos.filter(c => c.status === 'Pending').reduce((s, c) => s + Number(c.amount || 0), 0);
     const contractSum = Number(p.original_contract || 0) + approved;
@@ -592,8 +631,29 @@ function toClient(p, deliveries) {
     shopSyncedAt: p.shop_synced_at ? new Date(p.shop_synced_at).toISOString() : '',
     sourceEstimateId: p.source_estimate_id || null,
     sourceBidNumber: p.source_bid_number || '',
+    // Approved + Paid change orders, so every screen shows the same contract sum.
+    approvedCoTotal: Number(p.approved_co_total || 0),
+    approvedCoCost: Number(p.approved_co_cost || 0),
+    pendingCoTotal: Number(p.pending_co_total || 0),
+    bidContract: p.bid_contract == null ? null : Number(p.bid_contract),
+    bidCost: p.bid_cost == null ? null : Number(p.bid_cost),
+    bidCheckedAt: p.bid_checked_at ? new Date(p.bid_checked_at).toISOString() : '',
+    bidDiff: bidDiffers(p),
   };
 }
+// True when R&R Bid's current contract or cost differs from this job's by a
+// dollar or more, and nobody has already chosen to keep ours for those numbers.
+function bidDiffers(p) {
+  if (p.bid_contract == null) return false;
+  const off = (a, b) => Math.abs(Number(a || 0) - Number(b || 0)) >= 1;
+  const differs = off(p.original_contract, p.bid_contract) || (p.bid_cost != null && off(p.cost, p.bid_cost));
+  if (!differs) return false;
+  const acked = p.bid_ack_contract != null && !off(p.bid_ack_contract, p.bid_contract) &&
+    (p.bid_cost == null || (p.bid_ack_cost != null && !off(p.bid_ack_cost, p.bid_cost)));
+  return !acked;
+}
+// Money columns hidden from the shop role.
+const SHOP_HIDDEN = { bidDiff: false, sellPrice: null, cost: null, actualCost: null, shopLaborCost: null, approvedCoTotal: null, approvedCoCost: null, pendingCoTotal: null, bidContract: null, bidCost: null };
 
 function projectValues(p) {
   return [
@@ -629,7 +689,10 @@ app.get('/api/projects', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT p.*,
-         (SELECT count(*) FROM change_orders c WHERE c.project_id = p.id) AS change_orders_count
+         (SELECT count(*) FROM change_orders c WHERE c.project_id = p.id) AS change_orders_count,
+         (SELECT COALESCE(sum(c.amount), 0) FROM change_orders c WHERE c.project_id = p.id AND c.status IN ('Approved', 'Paid')) AS approved_co_total,
+         (SELECT COALESCE(sum(c.cost), 0) FROM change_orders c WHERE c.project_id = p.id AND c.status IN ('Approved', 'Paid')) AS approved_co_cost,
+         (SELECT COALESCE(sum(c.amount), 0) FROM change_orders c WHERE c.project_id = p.id AND c.status = 'Pending') AS pending_co_total
        FROM projects p
        WHERE p.is_archived = false
        ORDER BY p.created_at DESC`
@@ -648,7 +711,7 @@ app.get('/api/projects', async (req, res) => {
     }
     let out = rows.map(p => toClient(p, delByProj[p.id]));
     // Shop never sees money: blank out contract and cost.
-    if (req.user.role === 'shop') out = out.map(c => ({ ...c, sellPrice: null, cost: null, actualCost: null, shopLaborCost: null }));
+    if (req.user.role === 'shop') out = out.map(c => ({ ...c, ...SHOP_HIDDEN }));
     res.json(out);
   } catch (err) {
     serverError(res, err);
@@ -750,6 +813,23 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
   }
 });
 
+// Job page notice: take R&R Bid's contract and cost, or keep ours. Only the
+// two money fields change; pay apps and change orders are not touched.
+app.post('/api/projects/:id/bid-numbers', auth.requireRole('super_admin', 'admin', 'pm'), async (req, res) => {
+  try {
+    const p = (await pool.query('SELECT bid_contract, bid_cost FROM projects WHERE id = $1', [req.params.id])).rows[0];
+    if (!p) return res.status(404).json({ error: 'Project not found' });
+    if (p.bid_contract == null) return res.status(400).json({ error: 'No R&R Bid numbers on file for this job yet.' });
+    if (req.body && req.body.action === 'use') {
+      await pool.query(`UPDATE projects SET original_contract = bid_contract, cost = COALESCE(bid_cost, cost),
+        bid_ack_contract = NULL, bid_ack_cost = NULL, updated_at = now() WHERE id = $1`, [req.params.id]);
+    } else if (req.body && req.body.action === 'keep') {
+      await pool.query('UPDATE projects SET bid_ack_contract = bid_contract, bid_ack_cost = bid_cost WHERE id = $1', [req.params.id]);
+    } else return res.status(400).json({ error: 'action must be use or keep' });
+    res.json({ ok: true });
+  } catch (err) { serverError(res, err); }
+});
+
 // LIST archived projects (admins only). Includes small counts so the
 // "permanently delete" screen can warn how much billing goes with the job.
 app.get('/api/projects/archived', auth.requireRole('super_admin', 'admin'), async (req, res) => {
@@ -828,6 +908,15 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const upload = multer({ dest: UPLOAD_DIR, limits: { fileSize: 30 * 1024 * 1024 } });
 
 const NET_DAYS = 30;
+const easternToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const cents = n => Math.round((Number(n) || 0) * 100) / 100;
+// "Billed" means sent to the GC. A Draft pay app has not gone out yet, so the
+// totals (billed to date, retainage held, what still needs billing) come from
+// the latest pay app that is not a Draft.
+const lastSent = rows => { for (let i = rows.length - 1; i >= 0; i--) if (rows[i].status !== 'Draft') return rows[i]; return null; };
+// The date a pay app started waiting for payment: submitted, else approved,
+// else the period it covers.
+const waitingSince = a => a.submittedDate || a.approvedDate || a.periodEnd || '';
 
 // running AIA math across a project's pay apps
 function invoiceRows(rows) {
@@ -836,9 +925,11 @@ function invoiceRows(rows) {
   return apps.map(a => {
     const completed = Number(a.work_completed_to_date || 0);
     const pct = Number(a.retainage_pct || 0);
-    const ret = a.retainage_held != null ? Number(a.retainage_held) : completed * pct / 100;
-    const elr = completed - ret;
-    const due = elr - prevELR;
+    // Retainage is money, so it is kept to the cent (10% of $1,444.67 is
+    // $144.47, not $144.467).
+    const ret = a.retainage_held != null ? Number(a.retainage_held) : cents(completed * pct / 100);
+    const elr = cents(completed - ret);
+    const due = cents(elr - prevELR);
     prevELR = elr;
     return {
       id: a.id, applicationNumber: a.application_number, periodEnd: a.period_end || '',
@@ -894,6 +985,7 @@ async function writeInvoiceLines(client, invoiceId, rows) {
   }
 }
 const approvedCoTotal = co => co.filter(c => c.status === 'Approved' || c.status === 'Paid').reduce((s, c) => s + Number(c.amount || 0), 0);
+const approvedCoCost = co => co.filter(c => c.status === 'Approved' || c.status === 'Paid').reduce((s, c) => s + Number(c.cost || 0), 0);
 const daysSince = ds => ds ? Math.round((Date.now() - new Date(ds + 'T00:00:00').getTime()) / 86400000) : 0;
 
 // ====== STAGE HISTORY ======
@@ -908,13 +1000,13 @@ app.get('/api/projects/:id/stage-history', async (req, res) => {
 });
 
 // ====== CHANGE ORDERS ======
-const coToClient = c => ({ id: c.id, coNumber: c.co_number, description: c.description || '', amount: Number(c.amount || 0), status: c.status, submittedDate: c.submitted_date || '', approvedDate: c.approved_date || '', paidDate: c.paid_date || '', fromBid: c.source_co_id != null });
+const coToClient = c => ({ id: c.id, coNumber: c.co_number, description: c.description || '', amount: Number(c.amount || 0), cost: c.cost == null ? null : Number(c.cost), status: c.status, submittedDate: c.submitted_date || '', approvedDate: c.approved_date || '', paidDate: c.paid_date || '', fromBid: c.source_co_id != null });
 app.get('/api/projects/:id/change-orders', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM change_orders WHERE project_id = $1 ORDER BY co_number', [req.params.id]);
     let out = rows.map(coToClient);
     // Shop sees C/O titles and status but never the dollars.
-    if (req.user.role === 'shop') out = out.map(c => ({ ...c, amount: null }));
+    if (req.user.role === 'shop') out = out.map(c => ({ ...c, amount: null, cost: null }));
     res.json(out);
   }
   catch (err) { serverError(res, err); }
@@ -924,9 +1016,9 @@ app.post('/api/projects/:id/change-orders', auth.requireRole('super_admin', 'adm
   if (!CO_STATUSES.includes(c.status || 'Pending')) return res.status(400).json({ error: 'Invalid change order status: ' + c.status });
   try {
     const { rows } = await pool.query(
-      `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, paid_date, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [req.params.id, c.coNumber, d(c.description), money(c.amount) || 0, c.status || 'Pending', d(c.submittedDate), d(c.approvedDate), d(c.paidDate), req.user.id]);
+      `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, paid_date, created_by, cost)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [req.params.id, c.coNumber, d(c.description), money(c.amount) || 0, c.status || 'Pending', d(c.submittedDate), d(c.approvedDate), d(c.paidDate), req.user.id, money(c.cost)]);
     res.json(coToClient(rows[0]));
   } catch (err) { serverError(res, err); }
 });
@@ -934,15 +1026,34 @@ app.put('/api/change-orders/:coId', auth.requireRole('super_admin', 'admin', 'ac
   const c = req.body;
   if (!CO_STATUSES.includes(c.status || 'Pending')) return res.status(400).json({ error: 'Invalid change order status: ' + c.status });
   try {
-    const { rows } = await pool.query(
-      `UPDATE change_orders SET co_number=$1, description=$2, amount=$3, status=$4, submitted_date=$5, approved_date=$6, paid_date=$7 WHERE id=$8 RETURNING *`,
-      [c.coNumber, d(c.description), money(c.amount) || 0, c.status || 'Pending', d(c.submittedDate), d(c.approvedDate), d(c.paidDate), req.params.coId]);
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const cur = (await pool.query('SELECT * FROM change_orders WHERE id = $1', [req.params.coId])).rows[0];
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    let rows;
+    if (cur.source_co_id != null) {
+      // From R&R Bid: number, description, amount, cost and the Pending /
+      // Approved / Withdrawn status follow the bid tool. Here you can only mark
+      // it Paid (or take Paid back off) and set the paid date.
+      const st = c.status || cur.status;
+      if (st !== cur.status && !(st === 'Paid' && cur.status === 'Approved') && cur.status !== 'Paid') return res.status(400).json({ error: 'This change order comes from R&R Bid. Change its status there; here you can only mark an approved one Paid.' });
+      const back = cur.status === 'Paid' && st !== 'Paid';
+      const nextStatus = back ? 'Approved' : st;
+      ({ rows } = await pool.query('UPDATE change_orders SET status=$1, paid_date=$2 WHERE id=$3 RETURNING *',
+        [nextStatus, nextStatus === 'Paid' ? (d(c.paidDate) || easternToday()) : null, req.params.coId]));
+    } else {
+      ({ rows } = await pool.query(
+        `UPDATE change_orders SET co_number=$1, description=$2, amount=$3, status=$4, submitted_date=$5, approved_date=$6, paid_date=$7, cost=$8 WHERE id=$9 RETURNING *`,
+        [c.coNumber || cur.co_number, d(c.description), money(c.amount) || 0, c.status || 'Pending', d(c.submittedDate), d(c.approvedDate), d(c.paidDate), money(c.cost), req.params.coId]));
+    }
     res.json(coToClient(rows[0]));
   } catch (err) { serverError(res, err); }
 });
 app.delete('/api/change-orders/:coId', auth.requireRole('super_admin', 'admin', 'accounting', 'pm'), async (req, res) => {
-  try { await pool.query('DELETE FROM change_orders WHERE id = $1', [req.params.coId]); res.json({ ok: true }); }
+  try {
+    // A change order from R&R Bid is removed there (it then shows Withdrawn here).
+    const cur = (await pool.query('SELECT source_co_id FROM change_orders WHERE id = $1', [req.params.coId])).rows[0];
+    if (cur && cur.source_co_id != null) return res.status(400).json({ error: 'This change order comes from R&R Bid. Delete or reject it there.' });
+    await pool.query('DELETE FROM change_orders WHERE id = $1', [req.params.coId]); res.json({ ok: true });
+  }
   catch (err) { serverError(res, err); }
 });
 
@@ -1013,7 +1124,7 @@ app.post('/api/invoices/:invId/payment', auth.requireRole('super_admin', 'admin'
     const status = newPaid >= due - 0.01 ? 'Paid' : 'Partially Paid';
     await pool.query(
       `UPDATE invoices SET amount_paid=$1, paid_date=$2, status=$3 WHERE id=$4`,
-      [newPaid, d(p.paidDate) || new Date().toISOString().slice(0, 10), status, req.params.invId]);
+      [newPaid, d(p.paidDate) || easternToday(), status, req.params.invId]);
     res.json({ ok: true, status, amountPaid: newPaid });
   } catch (err) { serverError(res, err); }
 });
@@ -1028,6 +1139,7 @@ app.post('/api/projects/:id/release-retainage', requireFinancial, async (req, re
     }
     const rows = invoiceRows(raw);
     const last = rows[rows.length - 1];
+    if (last && last.status === 'Draft') return res.status(400).json({ error: 'Pay app #' + last.applicationNumber + ' is still a Draft. Mark it Submitted before releasing retainage.' });
     const held = last ? Number(last.retainageHeld) : 0;
     if (!(held > 0.005)) return res.status(400).json({ error: 'No retainage is currently held on this job' });
     const appNo = raw.reduce((m, a) => Math.max(m, a.application_number), 0) + 1;
@@ -1093,7 +1205,7 @@ app.post('/api/invoices/:invId/generate', auth.requireRole('super_admin', 'admin
     const cover = {
       originalContractSum: Number(proj.original_contract || 0), stdRetPct: stdRet, storedRetPct: stdRet, previousCertificates: prevCert,
       project: proj.name || '', ownerGc: proj.customer || '', contractor: process.env.COMPANY_NAME || 'R&R Fabrication',
-      appNo: inv.application_number, invoiceDate: inv.submitted_date || new Date().toISOString().slice(0, 10),
+      appNo: inv.application_number, invoiceDate: inv.submitted_date || easternToday(),
       periodTo: inv.period_end || '', projectNo: proj.job_number || '', contractDate: proj.award_date || '',
       finalApp: !!(inv.is_final || inv.is_retainage_release),
     };
@@ -1194,7 +1306,7 @@ app.get('/api/billing', requireFinancial, async (req, res) => {
     const open = [], paidHist = [], needsBilling = [], retainageOutstanding = [], margin = [];
     for (const p of proj) {
       const rows = invoiceRows(invByProj[p.id] || []);
-      const last = rows[rows.length - 1];
+      const last = lastSent(rows);
       const contractSum = Number(p.original_contract || 0) + approvedCoTotal(coByProj[p.id] || []);
       const pBilled = last ? last.workCompletedToDate : 0;
       const pRet = last ? last.retainageHeld : 0;
@@ -1202,15 +1314,17 @@ app.get('/api/billing', requireFinancial, async (req, res) => {
       billedToDate += pBilled; retainageHeld += pRet; collected += pPaid;
       for (const a of rows) {
         if (a.status === 'Submitted' || a.status === 'Approved' || a.status === 'Partially Paid') {
-          const days = daysSince(a.submittedDate);
-          const remaining = a.currentPaymentDue - Number(a.amountPaid || 0);
-          open.push({ projectId: p.id, jobNumber: p.job_number || '', name: p.name, customer: p.customer || '', applicationNumber: a.applicationNumber, submittedDate: a.submittedDate, days, overdue: days > NET_DAYS, thisPeriod: a.currentPaymentDue, due: remaining, status: a.status, isRetainageRelease: a.isRetainageRelease });
+          const since = waitingSince(a);
+          const days = daysSince(since);
+          const remaining = cents(a.currentPaymentDue - Number(a.amountPaid || 0));
+          open.push({ projectId: p.id, jobNumber: p.job_number || '', name: p.name, customer: p.customer || '', applicationNumber: a.applicationNumber, submittedDate: a.submittedDate, since, noDate: !since, days, overdue: days > NET_DAYS, thisPeriod: a.currentPaymentDue, due: remaining, status: a.status, isRetainageRelease: a.isRetainageRelease });
         }
         if (a.status === 'Paid' && a.amountPaid) paidHist.push({ projectId: p.id, jobNumber: p.job_number || '', name: p.name, customer: p.customer || '', applicationNumber: a.applicationNumber, paidDate: a.paidDate, amountPaid: Number(a.amountPaid), isRetainageRelease: a.isRetainageRelease });
       }
       if (ACTIVE_FAB.includes(p.status)) {
-        const unbilled = contractSum - pBilled;
-        if (unbilled > 0) needsBilling.push({ projectId: p.id, jobNumber: p.job_number || '', name: p.name, customer: p.customer || '', status: p.status, unbilled, lastBilled: last ? last.periodEnd : null });
+        const unbilled = cents(contractSum - pBilled);
+        // Under a dollar is rounding, not work to bill.
+        if (unbilled >= 1) needsBilling.push({ projectId: p.id, jobNumber: p.job_number || '', name: p.name, customer: p.customer || '', status: p.status, unbilled, lastBilled: last ? last.periodEnd : null });
       }
       // Retainage aging: any job (Completed included) still holding retainage
       // with no paid release app yet.
@@ -1221,19 +1335,22 @@ app.get('/api/billing', requireFinancial, async (req, res) => {
       }
       // Margin roll-up across active jobs.
       if (ACTIVE_STAGES.includes(p.status)) {
-        const cost = Number(p.cost || 0);
+        // Cost includes the cost of approved change orders, so extra work does
+        // not show up as pure profit.
+        const cost = Number(p.cost || 0) + approvedCoCost(coByProj[p.id] || []);
         margin.push({ projectId: p.id, jobNumber: p.job_number || '', name: p.name, customer: p.customer || '', status: p.status, contractSum, cost, marginDollars: contractSum - cost, marginPct: contractSum > 0 ? (contractSum - cost) / contractSum * 100 : 0 });
       }
     }
-    open.sort((a, b) => b.days - a.days); needsBilling.sort((a, b) => b.unbilled - a.unbilled); paidHist.sort((a, b) => (b.paidDate || '').localeCompare(a.paidDate || ''));
+    open.sort((a, b) => (b.noDate - a.noDate) || (b.days - a.days)); needsBilling.sort((a, b) => b.unbilled - a.unbilled); paidHist.sort((a, b) => (b.paidDate || '').localeCompare(a.paidDate || ''));
     retainageOutstanding.sort((a, b) => b.daysHeld - a.daysHeld);
     margin.sort((a, b) => b.contractSum - a.contractSum);
     const marginTotals = { contractSum: 0, cost: 0 };
     for (const m of margin) { marginTotals.contractSum += m.contractSum; marginTotals.cost += m.cost; }
     marginTotals.marginDollars = marginTotals.contractSum - marginTotals.cost;
     marginTotals.marginPct = marginTotals.contractSum > 0 ? marginTotals.marginDollars / marginTotals.contractSum * 100 : 0;
-    const outstanding = open.reduce((s, o) => s + o.due, 0);
-    const overdue = open.filter(o => o.overdue).reduce((s, o) => s + o.due, 0);
+    const outstanding = cents(open.reduce((s, o) => s + o.due, 0));
+    const overdue = cents(open.filter(o => o.overdue).reduce((s, o) => s + o.due, 0));
+    billedToDate = cents(billedToDate); collected = cents(collected); retainageHeld = cents(retainageHeld);
     res.json({ billedToDate, collected, outstanding, overdue, retainageHeld, netDays: NET_DAYS, open, paidHist, needsBilling, retainageOutstanding, margin, marginTotals });
   } catch (err) { serverError(res, err); }
 });
@@ -1439,6 +1556,7 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
     client.release();
   }
   for (const nj of newJobs) { notifyNewProject(nj).catch(e => console.error('[notify] failed:', e.message)); kickoffSovSync(nj.id, nj.estimate_id); }
+  try { await recordBidNumbers(jobs); } catch (e) { console.error('[import] recording bid numbers failed:', e.message); }
   // Bring change orders up to date too, now that any new jobs exist.
   let changeOrders = null;
   try { changeOrders = await syncChangeOrdersFromBid(null); }
@@ -1535,6 +1653,8 @@ async function syncFromBid(trigger) {
         kickoffSovSync(newId, j.estimate_id);
       }
     }
+    try { out.bidNumbers = await recordBidNumbers(jobs); }
+    catch (e) { console.error('[bid sync] recording bid numbers failed: ' + e.message); }
     out.changeOrders = await syncChangeOrdersFromBid(null);
     // ShopTrack hours. A ShopTrack problem is logged but does not fail the run.
     try { out.shopLabor = await syncShopLabor(null); }

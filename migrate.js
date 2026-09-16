@@ -207,6 +207,20 @@ async function runExtraMigrations() {
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS shop_hours numeric(10,1)');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS shop_labor_cost numeric(14,2)');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS shop_synced_at timestamptz');
+    // Job audit (2026-09-16). All additive, nothing existing is rewritten.
+    //  - projects.bid_contract / bid_cost / bid_checked_at: what R&R Bid says the
+    //    job's contract and cost are right now, refreshed by the sync. The job
+    //    page offers to match them when they differ; nothing changes on its own.
+    //  - change_orders.cost: our cost on a change order (sent by R&R Bid, or
+    //    typed in), so margin counts the cost of the extra work too.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS bid_contract numeric(14,2)');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS bid_cost numeric(14,2)');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS bid_checked_at timestamptz');
+    await client.query('ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS cost numeric(14,2)');
+    //  - bid_ack_contract / bid_ack_cost: the R&R Bid numbers someone chose to
+    //    keep ours over, so the notice stays quiet until the bid changes again.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS bid_ack_contract numeric(14,2)');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS bid_ack_cost numeric(14,2)');
     console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines, bid change-order link, actual cost, ShopTrack labor).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
