@@ -203,7 +203,11 @@ async function runExtraMigrations() {
     await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uniq_change_orders_source ON change_orders (source_co_id) WHERE source_co_id IS NOT NULL');
     await client.query('ALTER TABLE change_orders DROP CONSTRAINT IF EXISTS change_orders_status_check');
     await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS actual_cost numeric(14,2)');
-    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines, bid change-order link, actual cost).');
+    // Shop hours and labor cost logged in ShopTrack, refreshed by the sync.
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS shop_hours numeric(10,1)');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS shop_labor_cost numeric(14,2)');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS shop_synced_at timestamptz');
+    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines, bid change-order link, actual cost, ShopTrack labor).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
   } finally {

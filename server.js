@@ -336,6 +336,47 @@ app.post('/api/integration/change-order', async (req, res) => {
   } finally { client.release(); }
 });
 
+// ====== SHOP LABOR FROM SHOPTRACK ======
+// ShopTrack (shop.rrfabrication.org) logs hours per job. The sync copies each
+// job's total hours and labor cost onto the matching project here (matched on
+// job number, case and spaces ignored). Read-only on the ShopTrack side.
+// Needs SHOPTRACK_URL and SHOPTRACK_KEY; without them this does nothing.
+function shopConfig() {
+  const base = (process.env.SHOPTRACK_URL || '').replace(/\/+$/, '');
+  const key = process.env.SHOPTRACK_KEY || '';
+  return base && key ? { base, key } : null;
+}
+async function fetchShopLabor(jobNumber, timeoutMs) {
+  const cfg = shopConfig();
+  if (!cfg) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || 20000);
+  try {
+    const r = await fetch(cfg.base + '/api/integration/job-labor' + (jobNumber ? '?job_number=' + encodeURIComponent(jobNumber) : ''),
+      { headers: { 'X-Integration-Key': cfg.key }, signal: ctrl.signal });
+    if (!r.ok) throw new Error('ShopTrack refused the labor request (status ' + r.status + ')');
+    const j = await r.json();
+    if (!j || !Array.isArray(j.jobs)) throw new Error('ShopTrack labor feed was not readable');
+    return j.jobs;
+  } finally { clearTimeout(timer); }
+}
+async function saveShopLabor(jobs) {
+  let matched = 0;
+  for (const s of jobs) {
+    const r = await pool.query(
+      `UPDATE projects SET shop_hours = $1, shop_labor_cost = $2, shop_synced_at = now()
+        WHERE lower(trim(job_number)) = lower(trim($3))`,
+      [money(s.hours) || 0, money(s.labor_cost) || 0, String(s.job_number || '')]);
+    matched += r.rowCount;
+  }
+  return matched;
+}
+async function syncShopLabor(jobNumber, timeoutMs) {
+  const jobs = await fetchShopLabor(jobNumber, timeoutMs);
+  if (!jobs) return { skipped: 'ShopTrack not configured' };
+  return { jobs: jobs.length, matched: await saveShopLabor(jobs) };
+}
+
 // ====== ONE JOB'S STATUS, FOR THE BID TOOL'S PROJECT TAB ======
 // Read-only and key-protected. Stage, contract with change orders, billing,
 // and cost (estimated and actual) for one job number.
@@ -346,8 +387,16 @@ app.get('/api/integration/job-status', async (req, res) => {
   const jobNo = String(req.query.job_number || '').trim();
   if (!jobNo) return res.status(400).json({ error: 'job_number is required' });
   try {
-    const p = (await pool.query('SELECT * FROM projects WHERE job_number = $1 ORDER BY is_archived LIMIT 1', [jobNo])).rows[0];
+    let p = (await pool.query('SELECT * FROM projects WHERE job_number = $1 ORDER BY is_archived LIMIT 1', [jobNo])).rows[0];
     if (!p) return res.status(404).json({ found: false });
+    // Freshen the ShopTrack hours for this one job; keep the stored numbers if
+    // ShopTrack is slow or down.
+    if (shopConfig()) {
+      try {
+        await syncShopLabor(jobNo, 4000);
+        p = (await pool.query('SELECT * FROM projects WHERE id = $1', [p.id])).rows[0];
+      } catch (e) { console.error('[job-status] ShopTrack refresh skipped:', e.message); }
+    }
     const cos = (await pool.query('SELECT status, amount FROM change_orders WHERE project_id = $1', [p.id])).rows;
     const inv = invoiceRows((await pool.query('SELECT * FROM invoices WHERE project_id = $1', [p.id])).rows);
     const last = inv[inv.length - 1];
@@ -371,6 +420,9 @@ app.get('/api/integration/job-status', async (req, res) => {
       contract_sum: contractSum,
       est_cost: p.cost == null ? null : Number(p.cost),
       actual_cost: p.actual_cost == null ? null : Number(p.actual_cost),
+      shop_hours: p.shop_hours == null ? null : Number(p.shop_hours),
+      shop_labor_cost: p.shop_labor_cost == null ? null : Number(p.shop_labor_cost),
+      shop_synced_at: p.shop_synced_at || null,
       billed_to_date: billed,
       billed_pct: contractSum > 0 ? billed / contractSum * 100 : 0,
       retainage_held: last ? Number(last.retainageHeld) : 0,
@@ -535,6 +587,9 @@ function toClient(p, deliveries) {
     completedDate: p.completed_date || '',
     needsSetup: !!p.needs_setup,
     actualCost: p.actual_cost == null ? null : Number(p.actual_cost),
+    shopHours: p.shop_hours == null ? null : Number(p.shop_hours),
+    shopLaborCost: p.shop_labor_cost == null ? null : Number(p.shop_labor_cost),
+    shopSyncedAt: p.shop_synced_at ? new Date(p.shop_synced_at).toISOString() : '',
     sourceEstimateId: p.source_estimate_id || null,
     sourceBidNumber: p.source_bid_number || '',
   };
@@ -593,7 +648,7 @@ app.get('/api/projects', async (req, res) => {
     }
     let out = rows.map(p => toClient(p, delByProj[p.id]));
     // Shop never sees money: blank out contract and cost.
-    if (req.user.role === 'shop') out = out.map(c => ({ ...c, sellPrice: null, cost: null, actualCost: null }));
+    if (req.user.role === 'shop') out = out.map(c => ({ ...c, sellPrice: null, cost: null, actualCost: null, shopLaborCost: null }));
     res.json(out);
   } catch (err) {
     serverError(res, err);
@@ -1447,7 +1502,7 @@ function kickoffCoSync(jobNumber) {
   syncChangeOrdersFromBid(jobNumber).catch(e => console.error('[co sync] job ' + jobNumber + ' failed:', e.message));
 }
 
-const lastBidSync = { at: null, trigger: null, ok: null, imported: [], changeOrders: null, error: null };
+const lastBidSync = { at: null, trigger: null, ok: null, imported: [], changeOrders: null, shopLabor: null, error: null };
 let bidSyncRunning = false;
 const AUTO_IMPORT_DAYS = 14;
 function wonRecently(j) {
@@ -1459,7 +1514,7 @@ async function syncFromBid(trigger) {
   const cfg = bidConfig();
   if (!cfg || !process.env.DATABASE_URL) return lastBidSync;
   bidSyncRunning = true;
-  const out = { at: new Date().toISOString(), trigger, ok: false, imported: [], changeOrders: null, error: null };
+  const out = { at: new Date().toISOString(), trigger, ok: false, imported: [], changeOrders: null, shopLabor: null, error: null };
   try {
     const feed = await fetchBidJson(cfg, '/api/estimates/feed/won-jobs');
     const jobs = (feed && feed.jobs) || [];
@@ -1481,10 +1536,14 @@ async function syncFromBid(trigger) {
       }
     }
     out.changeOrders = await syncChangeOrdersFromBid(null);
+    // ShopTrack hours. A ShopTrack problem is logged but does not fail the run.
+    try { out.shopLabor = await syncShopLabor(null); }
+    catch (e) { out.shopLabor = { error: e.message }; console.error('[bid sync] ShopTrack labor failed: ' + e.message); }
     out.ok = true;
     const co = out.changeOrders || {};
     console.log('[bid sync] ' + trigger + ': ' + out.imported.length + ' new job(s)' + (out.imported.length ? ' (' + out.imported.join(', ') + ')' : '') +
-      '; change orders ' + (co.added || 0) + ' added, ' + (co.updated || 0) + ' updated, ' + (co.withdrawn || 0) + ' withdrawn, ' + (co.waiting || 0) + ' waiting on their job');
+      '; change orders ' + (co.added || 0) + ' added, ' + (co.updated || 0) + ' updated, ' + (co.withdrawn || 0) + ' withdrawn, ' + (co.waiting || 0) + ' waiting on their job' +
+      (out.shopLabor && out.shopLabor.jobs != null ? '; ShopTrack hours for ' + out.shopLabor.matched + ' job(s)' : ''));
   } catch (e) {
     out.error = e.message;
     console.error('[bid sync] ' + trigger + ' FAILED: ' + e.message);
