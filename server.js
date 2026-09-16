@@ -18,6 +18,9 @@ const requireFinancial = auth.requireRole(...FINANCIAL_ROLES);
 // Allowed values for server-side validation (mirrors the frontend lists).
 const PROJECT_STATUSES = ['Awarded', 'Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping to Site', 'Field/Erection', 'Completed', 'On Hold'];
 const DRAWING_STATUSES = ['N/A', 'Not Started', 'In Progress', 'Approved', 'Revision Needed'];
+// Withdrawn: pulled back or deleted in R&R Bid. Kept for the record, never
+// counted toward the contract sum.
+const CO_STATUSES = ['Pending', 'Approved', 'Paid', 'Withdrawn'];
 const SEQUENCE_STATUSES = ['Not started', 'In Fabrication', 'In Galvanizing', 'In Paint', 'Shipped to Site', 'Erected'];
 const ACTIVE_STAGES = ['Detailing', 'Purchasing', 'In Fabrication', 'Ready for Galvanizing/Paint', 'In Galvanizing', 'In Paint', 'Shipping to Site', 'Field/Erection'];
 
@@ -200,6 +203,7 @@ app.post('/api/integration/won-job', async (req, res) => {
   notifyNewProject({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount })
     .catch(e => console.error('[notify] failed:', e.message));
   kickoffSovSync(newId, j.estimate_id);
+  kickoffCoSync(jobNo);
   res.json({ ok: true, created: true, job_number: jobNo, project_id: newId });
 });
 
@@ -273,6 +277,114 @@ app.post('/api/integration/resync-sov', async (req, res) => {
   finally { client.release(); }
 });
 
+// ====== CHANGE ORDERS FROM THE BID TOOL ======
+// R&R Bid sends a change order here whenever one on a won job is saved,
+// submitted, approved, rejected or deleted. Keyed on the bid tool's id
+// (source_co_id), so repeats update the same row. Rules:
+//   - Submitted in R&R Bid -> Pending here; Approved -> Approved.
+//   - Removed (Draft, Rejected, deleted) -> Withdrawn here. Never deleted, so
+//     documents attached to it stay.
+//   - Paid is only ever set here, and the sync never changes a Paid one
+//     (status, amount, number, description and job all stay as they are).
+// Change orders typed straight into the tracker have no source_co_id and are
+// never touched.
+async function upsertBidChangeOrder(client, c) {
+  const coId = parseInt(c && c.co_id, 10);
+  if (!coId) return { result: 'invalid' };
+  if (c.removed) {
+    const r = await client.query(
+      "UPDATE change_orders SET status = 'Withdrawn' WHERE source_co_id = $1 AND status NOT IN ('Paid', 'Withdrawn') RETURNING id", [coId]);
+    return { result: r.rowCount ? 'withdrawn' : 'unchanged' };
+  }
+  if (!['Pending', 'Approved'].includes(c.status)) return { result: 'invalid' };
+  const jobNo = String(c.job_number || '').trim();
+  let proj = jobNo ? (await client.query('SELECT id FROM projects WHERE job_number = $1 LIMIT 1', [jobNo])).rows[0] : null;
+  if (!proj && c.estimate_id) proj = (await client.query('SELECT id FROM projects WHERE source_estimate_id = $1 ORDER BY is_archived, created_at LIMIT 1', [c.estimate_id])).rows[0];
+  if (!proj) return { result: 'no-project' };
+  const r = await client.query(
+    `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, source_co_id)
+     VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, CASE WHEN $5 = 'Approved' THEN CURRENT_DATE END, $6)
+     ON CONFLICT (source_co_id) WHERE source_co_id IS NOT NULL DO UPDATE SET
+       project_id = CASE WHEN change_orders.status = 'Paid' THEN change_orders.project_id ELSE EXCLUDED.project_id END,
+       co_number = CASE WHEN change_orders.status = 'Paid' THEN change_orders.co_number ELSE EXCLUDED.co_number END,
+       description = CASE WHEN change_orders.status = 'Paid' THEN change_orders.description ELSE EXCLUDED.description END,
+       amount = CASE WHEN change_orders.status = 'Paid' THEN change_orders.amount ELSE EXCLUDED.amount END,
+       status = CASE WHEN change_orders.status = 'Paid' THEN 'Paid' ELSE EXCLUDED.status END,
+       submitted_date = COALESCE(change_orders.submitted_date, CURRENT_DATE),
+       approved_date = CASE
+         WHEN change_orders.status = 'Paid' THEN change_orders.approved_date
+         WHEN EXCLUDED.status = 'Approved' THEN COALESCE(change_orders.approved_date, CURRENT_DATE)
+         ELSE NULL END
+     RETURNING (xmax = 0) AS inserted`,
+    [proj.id, String(c.co_number || 'CO').slice(0, 60), d(c.title), money(c.amount) || 0, c.status, coId]);
+  return { result: r.rows[0] && r.rows[0].inserted ? 'added' : 'updated', projectId: proj.id };
+}
+
+app.post('/api/integration/change-order', async (req, res) => {
+  const key = process.env.TRACKER_KEY || '';
+  const provided = req.get('X-Integration-Key') || '';
+  if (!key || !provided || !safeEqual(provided, key)) return res.status(401).json({ error: 'invalid integration key' });
+  const client = await pool.connect();
+  try {
+    const out = await upsertBidChangeOrder(client, req.body || {});
+    if (out.result === 'invalid') return res.status(400).json({ error: 'co_id and a valid status are required' });
+    if (out.result === 'no-project') return res.status(404).json({ error: 'project not in tracker' });
+    res.json({ ok: true, result: out.result });
+  } catch (err) {
+    console.error('[change-order push] failed:', err);
+    res.status(500).json({ error: 'Something went wrong on the server' });
+  } finally { client.release(); }
+});
+
+// ====== ONE JOB'S STATUS, FOR THE BID TOOL'S PROJECT TAB ======
+// Read-only and key-protected. Stage, contract with change orders, billing,
+// and cost (estimated and actual) for one job number.
+app.get('/api/integration/job-status', async (req, res) => {
+  const key = process.env.TRACKER_KEY || '';
+  const provided = req.get('X-Integration-Key') || '';
+  if (!key || !provided || !safeEqual(provided, key)) return res.status(401).json({ error: 'invalid integration key' });
+  const jobNo = String(req.query.job_number || '').trim();
+  if (!jobNo) return res.status(400).json({ error: 'job_number is required' });
+  try {
+    const p = (await pool.query('SELECT * FROM projects WHERE job_number = $1 ORDER BY is_archived LIMIT 1', [jobNo])).rows[0];
+    if (!p) return res.status(404).json({ found: false });
+    const cos = (await pool.query('SELECT status, amount FROM change_orders WHERE project_id = $1', [p.id])).rows;
+    const inv = invoiceRows((await pool.query('SELECT * FROM invoices WHERE project_id = $1', [p.id])).rows);
+    const last = inv[inv.length - 1];
+    const approved = approvedCoTotal(cos);
+    const pending = cos.filter(c => c.status === 'Pending').reduce((s, c) => s + Number(c.amount || 0), 0);
+    const contractSum = Number(p.original_contract || 0) + approved;
+    const billed = last ? Number(last.workCompletedToDate) : 0;
+    const base = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+    res.json({
+      found: true,
+      job_number: p.job_number,
+      name: p.name,
+      status: p.status,
+      needs_setup: !!p.needs_setup,
+      archived: !!p.is_archived,
+      projected_start_date: p.projected_start_date || null,
+      completed_date: p.completed_date || null,
+      original_contract: Number(p.original_contract || 0),
+      approved_co_total: approved,
+      pending_co_total: pending,
+      contract_sum: contractSum,
+      est_cost: p.cost == null ? null : Number(p.cost),
+      actual_cost: p.actual_cost == null ? null : Number(p.actual_cost),
+      billed_to_date: billed,
+      billed_pct: contractSum > 0 ? billed / contractSum * 100 : 0,
+      retainage_held: last ? Number(last.retainageHeld) : 0,
+      collected: inv.reduce((s, a) => s + Number(a.amountPaid || 0), 0),
+      pay_apps: inv.length,
+      updated_at: p.updated_at,
+      tracker_url: base ? base + '/?job=' + encodeURIComponent(p.job_number) : null,
+    });
+  } catch (err) {
+    console.error('[job-status] failed:', err);
+    res.status(500).json({ error: 'Something went wrong on the server' });
+  }
+});
+
 // ====== SSO FROM THE BID TOOL (public; mounted before the auth wall) ======
 // R&R Bid signs a short-lived JWT with the shared TRACKER_KEY and sends the
 // user here. We verify it, create or update the matching tracker user, set
@@ -319,7 +431,10 @@ app.get('/sso', async (req, res) => {
       }
     }
     auth.setAuthCookie(res, u);
-    res.redirect('/');
+    // Optional landing page from R&R Bid, e.g. /?job=1234-5678. Same-site
+    // paths only; anything else lands on the home page.
+    const next = String(req.query.next || '');
+    res.redirect(/^\/(?![\/\\])[^\s]*$/.test(next) ? next : '/');
   } catch (err) {
     console.error('[sso] failed:', err);
     ssoErrorPage(res, invalidMsg);
@@ -419,6 +534,9 @@ function toClient(p, deliveries) {
     projectedStartDate: p.projected_start_date || '',
     completedDate: p.completed_date || '',
     needsSetup: !!p.needs_setup,
+    actualCost: p.actual_cost == null ? null : Number(p.actual_cost),
+    sourceEstimateId: p.source_estimate_id || null,
+    sourceBidNumber: p.source_bid_number || '',
   };
 }
 
@@ -475,7 +593,7 @@ app.get('/api/projects', async (req, res) => {
     }
     let out = rows.map(p => toClient(p, delByProj[p.id]));
     // Shop never sees money: blank out contract and cost.
-    if (req.user.role === 'shop') out = out.map(c => ({ ...c, sellPrice: null, cost: null }));
+    if (req.user.role === 'shop') out = out.map(c => ({ ...c, sellPrice: null, cost: null, actualCost: null }));
     res.json(out);
   } catch (err) {
     serverError(res, err);
@@ -495,10 +613,10 @@ app.post('/api/projects', auth.requireRole('super_admin', 'admin', 'pm'), async 
          job_number, name, customer, original_contract, cost, pm, status, drawing_status,
          bid_due_date, submitted_date, award_date, project_start_date, fab_start_date,
          galv_send_date, galv_return_date, paint_send_date, paint_complete_date,
-         material_ordered, notes, projected_start_date, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+         material_ordered, notes, projected_start_date, created_by, actual_cost)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING id, status`,
-      [...projectValues(p), d(p.projectedStartDate), req.user.id]
+      [...projectValues(p), d(p.projectedStartDate), req.user.id, money(p.actualCost)]
     );
     const id = ins.rows[0].id;
     await client.query(
@@ -543,9 +661,11 @@ app.put('/api/projects/:id', auth.requireRole('super_admin', 'admin', 'pm'), asy
          drawing_status=$8, bid_due_date=$9, submitted_date=$10, award_date=$11,
          project_start_date=$12, fab_start_date=$13, galv_send_date=$14, galv_return_date=$15,
          paint_send_date=$16, paint_complete_date=$17, material_ordered=$18, notes=$19,
-         projected_start_date=$20, updated_at = now()
+         projected_start_date=$20,
+         actual_cost = CASE WHEN $22::boolean THEN $23::numeric ELSE actual_cost END,
+         updated_at = now()
        WHERE id=$21`,
-      [...projectValues(p), d(p.projectedStartDate), id]
+      [...projectValues(p), d(p.projectedStartDate), id, Object.prototype.hasOwnProperty.call(p, 'actualCost'), money(p.actualCost)]
     );
     if (p.status === 'Completed') await client.query('UPDATE projects SET completed_date = COALESCE(completed_date, CURRENT_DATE) WHERE id = $1', [id]);
     // A job is "set up" once its projected start date is filled in; clear the flag.
@@ -733,7 +853,7 @@ app.get('/api/projects/:id/stage-history', async (req, res) => {
 });
 
 // ====== CHANGE ORDERS ======
-const coToClient = c => ({ id: c.id, coNumber: c.co_number, description: c.description || '', amount: Number(c.amount || 0), status: c.status, submittedDate: c.submitted_date || '', approvedDate: c.approved_date || '', paidDate: c.paid_date || '' });
+const coToClient = c => ({ id: c.id, coNumber: c.co_number, description: c.description || '', amount: Number(c.amount || 0), status: c.status, submittedDate: c.submitted_date || '', approvedDate: c.approved_date || '', paidDate: c.paid_date || '', fromBid: c.source_co_id != null });
 app.get('/api/projects/:id/change-orders', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM change_orders WHERE project_id = $1 ORDER BY co_number', [req.params.id]);
@@ -746,6 +866,7 @@ app.get('/api/projects/:id/change-orders', async (req, res) => {
 });
 app.post('/api/projects/:id/change-orders', auth.requireRole('super_admin', 'admin', 'accounting', 'pm'), async (req, res) => {
   const c = req.body;
+  if (!CO_STATUSES.includes(c.status || 'Pending')) return res.status(400).json({ error: 'Invalid change order status: ' + c.status });
   try {
     const { rows } = await pool.query(
       `INSERT INTO change_orders (project_id, co_number, description, amount, status, submitted_date, approved_date, paid_date, created_by)
@@ -756,6 +877,7 @@ app.post('/api/projects/:id/change-orders', auth.requireRole('super_admin', 'adm
 });
 app.put('/api/change-orders/:coId', auth.requireRole('super_admin', 'admin', 'accounting', 'pm'), async (req, res) => {
   const c = req.body;
+  if (!CO_STATUSES.includes(c.status || 'Pending')) return res.status(400).json({ error: 'Invalid change order status: ' + c.status });
   try {
     const { rows } = await pool.query(
       `UPDATE change_orders SET co_number=$1, description=$2, amount=$3, status=$4, submitted_date=$5, approved_date=$6, paid_date=$7 WHERE id=$8 RETURNING *`,
@@ -1262,7 +1384,146 @@ app.post('/api/import/won-jobs', auth.requireRole('super_admin', 'admin'), async
     client.release();
   }
   for (const nj of newJobs) { notifyNewProject(nj).catch(e => console.error('[notify] failed:', e.message)); kickoffSovSync(nj.id, nj.estimate_id); }
-  res.json({ ok: true, importedCount: imported.length, skippedCount: skipped.length, imported, skipped });
+  // Bring change orders up to date too, now that any new jobs exist.
+  let changeOrders = null;
+  try { changeOrders = await syncChangeOrdersFromBid(null); }
+  catch (e) { console.error('[import] change order sync failed:', e.message); changeOrders = { error: e.message }; }
+  res.json({ ok: true, importedCount: imported.length, skippedCount: skipped.length, imported, skipped, changeOrders });
+});
+
+// ====== CATCH-UP SYNC WITH THE BID TOOL ======
+// The bid tool pushes won jobs and change orders the moment they happen, but a
+// push is one attempt. If the tracker was down or redeploying at that moment,
+// it was missed. This pulls everything again, a minute after every start and
+// every night at 2 AM Eastern, so anything missed is caught within a day.
+// Idempotent: jobs already here are skipped, change orders update in place.
+// The run right after a start sends no new-job emails. Nightly and manual runs
+// email only people who turned the new-job email on in Settings.
+// The automatic runs only add jobs won in the last AUTO_IMPORT_DAYS, since
+// their job is catching a missed push. Older won jobs that were never brought
+// in stay out until someone clicks Import won jobs, same as before.
+// BID_SYNC=off turns the timer off (the manual import still works).
+async function fetchBidJson(cfg, pathAndQuery) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const r = await fetch(cfg.base + pathAndQuery, { headers: { 'X-Integration-Key': cfg.key }, signal: ctrl.signal });
+    if (!r.ok) throw new Error('Bid tool refused ' + pathAndQuery.split('?')[0] + ' (status ' + r.status + ')');
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+
+// jobNumber null = every job, and withdraw synced change orders the bid tool
+// no longer lists. With a job number, only that job, and nothing is withdrawn.
+async function syncChangeOrdersFromBid(jobNumber) {
+  const cfg = bidConfig();
+  if (!cfg) return { skipped: 'bid integration not configured' };
+  const feed = await fetchBidJson(cfg, '/api/estimates/feed/change-orders' + (jobNumber ? '?job_number=' + encodeURIComponent(jobNumber) : ''));
+  const list = (feed && Array.isArray(feed.change_orders)) ? feed.change_orders : null;
+  if (!list) throw new Error('Bid tool change-order feed was not readable');
+  const tally = { added: 0, updated: 0, withdrawn: 0, waiting: 0 };
+  const client = await pool.connect();
+  try {
+    for (const c of list) {
+      const r = await upsertBidChangeOrder(client, c);
+      if (r.result === 'added') tally.added++;
+      else if (r.result === 'updated') tally.updated++;
+      else if (r.result === 'no-project') tally.waiting++;
+    }
+    if (!jobNumber && feed.complete === true) {
+      const live = list.map(c => parseInt(c.co_id, 10)).filter(Boolean);
+      const w = await client.query(
+        "UPDATE change_orders SET status = 'Withdrawn' WHERE source_co_id IS NOT NULL AND status NOT IN ('Paid', 'Withdrawn') AND NOT (source_co_id = ANY($1::int[])) RETURNING id",
+        [live]);
+      tally.withdrawn = w.rowCount;
+    }
+  } finally { client.release(); }
+  return tally;
+}
+
+// Pull one job's change orders right after the job lands here.
+function kickoffCoSync(jobNumber) {
+  if (!jobNumber || !bidConfig()) return;
+  syncChangeOrdersFromBid(jobNumber).catch(e => console.error('[co sync] job ' + jobNumber + ' failed:', e.message));
+}
+
+const lastBidSync = { at: null, trigger: null, ok: null, imported: [], changeOrders: null, error: null };
+let bidSyncRunning = false;
+const AUTO_IMPORT_DAYS = 14;
+function wonRecently(j) {
+  const t = Date.parse(String(j.won_at || '').replace(' ', 'T') + (String(j.won_at || '').includes('Z') ? '' : 'Z'));
+  return Number.isFinite(t) && Date.now() - t <= AUTO_IMPORT_DAYS * 86400000;
+}
+async function syncFromBid(trigger) {
+  if (bidSyncRunning) return lastBidSync;
+  const cfg = bidConfig();
+  if (!cfg || !process.env.DATABASE_URL) return lastBidSync;
+  bidSyncRunning = true;
+  const out = { at: new Date().toISOString(), trigger, ok: false, imported: [], changeOrders: null, error: null };
+  try {
+    const feed = await fetchBidJson(cfg, '/api/estimates/feed/won-jobs');
+    const jobs = (feed && feed.jobs) || [];
+    for (const j of jobs) {
+      const jobNo = String(j.job_number || '').trim();
+      if (!jobNo) continue;
+      if (trigger !== 'manual' && !wonRecently(j)) continue;
+      const client = await pool.connect();
+      let newId = null;
+      try { newId = await createProjectFromWonJob(client, j, null); }
+      catch (e) { console.error('[bid sync] job ' + jobNo + ' failed:', e.message); }
+      finally { client.release(); }
+      if (newId) {
+        out.imported.push(jobNo);
+        // The run right after a start or update is silent: no new-job emails.
+        if (trigger !== 'startup') notifyNewProject({ id: newId, job_number: jobNo, name: j.project_name || ('Job ' + jobNo), customer: j.client_gc, contract_amount: j.contract_amount })
+          .catch(e => console.error('[notify] failed:', e.message));
+        kickoffSovSync(newId, j.estimate_id);
+      }
+    }
+    out.changeOrders = await syncChangeOrdersFromBid(null);
+    out.ok = true;
+    const co = out.changeOrders || {};
+    console.log('[bid sync] ' + trigger + ': ' + out.imported.length + ' new job(s)' + (out.imported.length ? ' (' + out.imported.join(', ') + ')' : '') +
+      '; change orders ' + (co.added || 0) + ' added, ' + (co.updated || 0) + ' updated, ' + (co.withdrawn || 0) + ' withdrawn, ' + (co.waiting || 0) + ' waiting on their job');
+  } catch (e) {
+    out.error = e.message;
+    console.error('[bid sync] ' + trigger + ' FAILED: ' + e.message);
+  } finally {
+    bidSyncRunning = false;
+    Object.assign(lastBidSync, out);
+  }
+  return lastBidSync;
+}
+
+// Eastern wall clock, so "2 AM" stays 2 AM across daylight saving.
+function easternParts(date) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false }).formatToParts(date);
+  const get = t => (parts.find(p => p.type === t) || {}).value;
+  return { day: get('year') + '-' + get('month') + '-' + get('day'), hour: parseInt(get('hour'), 10) % 24 };
+}
+let nightlyDoneFor = null;
+function startBidSyncTimer() {
+  if (process.env.BID_SYNC === 'off') { console.log('[bid sync] disabled by BID_SYNC=off'); return; }
+  if (!bidConfig()) { console.log('[bid sync] bid integration not configured; catch-up sync off'); return; }
+  nightlyDoneFor = easternParts(new Date()).day;   // today's run is the startup one
+  setTimeout(() => syncFromBid('startup'), 60 * 1000).unref();
+  setInterval(() => {
+    const now = easternParts(new Date());
+    if (now.hour >= 2 && nightlyDoneFor !== now.day) {
+      nightlyDoneFor = now.day;
+      syncFromBid('nightly');
+    }
+  }, 10 * 60 * 1000).unref();
+}
+
+// Admin view of the last catch-up run, and a button to run one now.
+app.get('/api/bid-sync', auth.requireRole('super_admin', 'admin'), (req, res) => {
+  res.json({ configured: !!bidConfig(), running: bidSyncRunning, last: lastBidSync });
+});
+app.post('/api/bid-sync', auth.requireRole('super_admin', 'admin'), async (req, res) => {
+  if (!bidConfig()) return res.status(500).json({ error: 'Bid integration is not configured (BID_API_URL / TRACKER_KEY).' });
+  const r = await syncFromBid('manual');
+  res.json({ configured: true, running: false, last: r });
 });
 
 // The old standalone new-job recipient list was retired in favour of per-user
@@ -1307,6 +1568,7 @@ app.get('*', (req, res) => {
 // Create the PostgreSQL tables on startup (non-fatal if it cannot connect).
 // Demo seeding is intentionally turned off: real data only from here on.
 runMigrations().then(() => runExtraMigrations()).catch(err => console.error('[startup] failed:', err.message));
+startBidSyncTimer();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`R&R Project Tracker running on port ${PORT}`));

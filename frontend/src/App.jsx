@@ -186,7 +186,9 @@ input[type=number]{-moz-appearance:textfield}
 function statusPill(s) { const c = STATUS_COLORS[s] || '#888'; return <span className="pill" style={{ background: c + '1e', color: c }}>{s}</span>; }
 const tg = (map, s) => { const c = map[s] || '#888'; return <span className="tag" style={{ background: c + '1e', color: c }}>{s}</span>; };
 const setupBadge = p => p && p.needsSetup ? <span className="setup" title="Imported from the bid tool - still needs its dates set up">Setup needed</span> : null;
-const coTag = s => tg({ Pending: '#f59e0b', Approved: '#16a34a', Paid: '#22c55e' }, s);
+const coTag = s => tg({ Pending: '#f59e0b', Approved: '#16a34a', Paid: '#22c55e', Withdrawn: '#9aa0ab' }, s);
+const BID_URL_FALLBACK = 'https://bid.rrfabrication.org';
+const fromBidChip = <span className="chip" style={{ marginLeft: 6, fontSize: 10.5, padding: '1px 7px' }} title="Sent from R&R Bid. Number, description, amount and status follow the bid tool. Paid is set here and never changed by it.">from R&amp;R Bid</span>;
 const payTag = s => tg({ Draft: '#6b7280', Submitted: '#7c3aed', Approved: '#16a34a', 'Partially Paid': '#0ea5e9', Paid: '#22c55e' }, s);
 
 // Sidebar icons. Plain stroked paths so they inherit the nav item's colour.
@@ -265,6 +267,9 @@ function ProjectModal({ initial, onClose, onSaved }) {
   const set = k => e => setP({ ...p, [k]: e.target.value });
   const gp = (parseFloat(p.sellPrice) || 0) - (parseFloat(p.cost) || 0);
   const gm = parseFloat(p.sellPrice) > 0 ? gp / parseFloat(p.sellPrice) * 100 : 0;
+  const hasActual = p.actualCost !== '' && p.actualCost != null && !isNaN(parseFloat(p.actualCost));
+  const agp = (parseFloat(p.sellPrice) || 0) - (parseFloat(p.actualCost) || 0);
+  const agm = parseFloat(p.sellPrice) > 0 ? agp / parseFloat(p.sellPrice) * 100 : 0;
   const save = async () => { if (!p.name) { setErr('Project name is required'); return; } if (!p.projectedStartDate) { setErr('Projected start date is required'); return; } setBusy(true); setErr(null); try { if (p.id) await api.send('PUT', '/api/projects/' + p.id, { ...p, expectedUpdatedAt: p.updatedAt }); else await api.send('POST', '/api/projects', p); onSaved(); } catch (e) { if (e.status === 409) { alert(e.message); onSaved(); return; } setErr(e.message); setBusy(false); } };
   return <Modal onClose={onClose}>
     <h2>{p.id ? 'Edit project' : 'New project'}</h2>
@@ -273,6 +278,9 @@ function ProjectModal({ initial, onClose, onSaved }) {
     <div className="row2"><div className="field"><label>PM</label><select value={p.pm} onChange={set('pm')}>{PMS.map(s => <option key={s}>{s}</option>)}</select></div><div className="field"><label>Drawing status</label><select value={p.drawingStatus} onChange={set('drawingStatus')}>{DRAWING.map(s => <option key={s}>{s}</option>)}</select></div></div>
     <div className="row2"><div className="field"><label>Original contract ($)</label><input type="number" value={p.sellPrice} onChange={set('sellPrice')} /></div><div className="field"><label>Our cost ($)</label><input type="number" value={p.cost} onChange={set('cost')} /></div></div>
     <div className="calc"><div><span>Gross profit</span><span className="num">{fmt$(gp)}</span></div><div><span>Gross margin</span><span className={'num ' + gmColor(gm)}>{gm.toFixed(1)}%</span></div></div>
+    <div className="field" style={{ marginTop: 12 }}><label>Actual cost to date ($)</label><input type="number" value={p.actualCost == null ? '' : p.actualCost} onChange={e => setP({ ...p, actualCost: e.target.value === '' ? null : e.target.value })} placeholder="Leave blank until you have it" /></div>
+    {hasActual && <div className="calc"><div><span>Actual gross profit</span><span className="num">{fmt$(agp)}</span></div><div><span>Actual margin</span><span className={'num ' + gmColor(agm)}>{agm.toFixed(1)}%</span></div></div>}
+    <div className="note">Actual cost shows up next to the estimate on this job&apos;s bid in R&amp;R Bid.</div>
     <div className="row2" style={{ marginTop: 12 }}><div className="field"><label>Award date</label><input type="date" value={p.awardDate || ''} onChange={set('awardDate')} /></div><div className="field"><label>Projected start <span style={{ color: 'var(--r)' }}>*</span></label><input type="date" value={p.projectedStartDate || ''} onChange={set('projectedStartDate')} /></div></div>
     <div className="row2"><div className="field"><label>Fab start</label><input type="date" value={p.fabStartDate || ''} onChange={set('fabStartDate')} /></div><div className="field"><label>Galv send</label><input type="date" value={p.galvSendDate || ''} onChange={set('galvSendDate')} /></div></div>
     <div className="field"><label>Material ordered</label><select value={p.materialOrdered ? 'yes' : 'no'} onChange={e => setP({ ...p, materialOrdered: e.target.value === 'yes' })}><option value="no">No</option><option value="yes">Yes</option></select></div>
@@ -376,7 +384,8 @@ function Dashboard({ user, onOpen }) {
 function ItemModal({ item, onClose }) {
   if (item.kind === 'co') { const c = item.data; return <Modal onClose={onClose}><h2>Change order {c.coNumber}</h2>
     <div className="calc"><div><span>Description</span><span>{c.description || '—'}</span></div><div><span>Amount</span><span className="num">{fmt$(c.amount)}</span></div><div><span>Status</span><span>{c.status}</span></div><div><span>Submitted</span><span>{fmtDate(c.submittedDate)}</span></div><div><span>Approved</span><span>{fmtDate(c.approvedDate)}</span></div><div><span>Paid</span><span>{fmtDate(c.paidDate)}</span></div></div>
-    <div className="note" style={{ marginTop: 10 }}>{(c.status === 'Approved' || c.status === 'Paid') ? 'This change order is included in the contract sum.' : 'Pending change orders do not affect the contract sum yet.'}</div>
+    <div className="note" style={{ marginTop: 10 }}>{(c.status === 'Approved' || c.status === 'Paid') ? 'This change order is included in the contract sum.' : c.status === 'Withdrawn' ? 'Withdrawn in R&R Bid (rejected, moved back to draft, or deleted). Kept here for the record and not counted in the contract sum.' : 'Pending change orders do not affect the contract sum yet.'}</div>
+    {c.fromBid && <div className="note" style={{ marginTop: 6 }}>This change order comes from R&amp;R Bid. Its number, description, amount and status follow the bid tool, so change those there. Marking it Paid happens here, and the bid tool never undoes that.</div>}
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Close</button></div></Modal>; }
   const a = item.data; return <Modal onClose={onClose}><h2>Pay Application #{a.applicationNumber}</h2>
     <div className="calc"><div><span>Period through</span><span>{fmtDate(a.periodEnd)}</span></div><div><span>Completed to date</span><span className="num">{fmt$(a.workCompletedToDate)}</span></div><div><span>Retainage ({a.retainagePct}%)</span><span className="num">- {fmt$(a.retainageHeld)}</span></div><div className="tot"><span>Payment due</span><span className="num">{fmt$(a.currentPaymentDue)}</span></div></div>
@@ -384,7 +393,7 @@ function ItemModal({ item, onClose }) {
     <div className="actions"><button className="btn-ghost" onClick={onClose}>Close</button></div></Modal>;
 }
 
-function Detail({ id, user, onBack }) {
+function Detail({ id, user, onBack, bidUrl }) {
   const [p, setP] = useState(null); const [hist, setHist] = useState([]); const [cos, setCos] = useState([]); const [invs, setInvs] = useState([]); const [docs, setDocs] = useState([]); const [notes, setNotes] = useState([]); const [seqs, setSeqs] = useState([]); const [sov, setSov] = useState([]); const [modal, setModal] = useState(null); const [openN, setOpenN] = useState({}); const [syncing, setSyncing] = useState(false); const [genId, setGenId] = useState(null);
   const load = useCallback(async () => {
     const all = await api.get('/api/projects'); setP(all.find(x => x.id === id) || null);
@@ -405,6 +414,7 @@ function Detail({ id, user, onBack }) {
   const retHeld = last ? Number(last.retainageHeld) : 0;
   const totalPaid = invs.reduce((s, a) => s + Number(a.amountPaid || 0), 0);
   const gp = contractSum - (Number(p.cost) || 0); const gm = contractSum > 0 ? gp / contractSum * 100 : 0;
+  const agm = contractSum > 0 && p.actualCost != null ? (contractSum - Number(p.actualCost)) / contractSum * 100 : 0;
   const eP = can.editProject(user.role), eC = can.editCO(user.role), eI = can.editPayApp(user.role); const eS = ['super_admin', 'admin', 'pm', 'shop'].includes(user.role); const eA = can.archive(user.role);
   const seeMoney = can.seeMoney(user.role);
   // Map each pay app (invoice) to its attached signed pay app document, if any.
@@ -446,7 +456,7 @@ function Detail({ id, user, onBack }) {
     <span className="back" onClick={onBack}>← Back to projects</span>
     <div className="dhead">
       <div>{p.jobNumber && <div className="joblabel">#{p.jobNumber}</div>}<h1>{p.name}</h1>
-        <div className="muted" style={{ marginTop: 4 }}>{p.customer} · PM {p.pm || '—'}{p.awardDate ? ' · Awarded ' + fmtDate(p.awardDate) : ''}</div>
+        <div className="muted" style={{ marginTop: 4 }}>{p.customer} · PM {p.pm || '—'}{p.awardDate ? ' · Awarded ' + fmtDate(p.awardDate) : ''}{p.sourceEstimateId ? <> · <a href={(bidUrl || BID_URL_FALLBACK).replace(/\/+$/, '') + '/#/estimate/' + p.sourceEstimateId} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--ac)', fontWeight: 600, textDecoration: 'none' }} title="Open the bid this job came from">Bid {p.sourceBidNumber || '#' + p.sourceEstimateId} in R&amp;R Bid ↗</a></> : null}</div>
         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}><span className="chip">Drawings: {p.drawingStatus || 'N/A'}</span><span className="chip" style={p.materialOrdered ? { color: '#16a34a', borderColor: '#bbf7d0', background: '#f0fdf4' } : {}}>Material {p.materialOrdered ? 'ordered ✓' : 'not ordered'}</span>{setupBadge(p)}</div>
         {p.needsSetup && <div className="note" style={{ marginTop: 8, color: '#b45309' }}>This job came in from the bid tool and still needs setting up. {eP ? 'Add the projected start date (and fab/delivery dates) to clear this.' : 'A PM or admin needs to add the projected start date.'}</div>}
       </div>
@@ -465,7 +475,9 @@ function Detail({ id, user, onBack }) {
       <div className="kv"><div className="k">Retainage held</div><div className="v num">{fmt$(retHeld)}</div></div>
       <div className="kv"><div className="k">Net paid</div><div className="v num">{fmt$(totalPaid)}</div></div>
       <div className="kv"><div className="k">Balance to finish</div><div className="v num">{fmt$(contractSum - billed)}</div></div>
-      <div className="kv"><div className="k">Gross margin</div><div className={'v num ' + gmColor(gm)}>{gm.toFixed(1)}%</div></div></div></div>}
+      <div className="kv"><div className="k">Gross margin (estimate)</div><div className={'v num ' + gmColor(gm)}>{gm.toFixed(1)}%</div></div>
+      {p.actualCost != null && <><div className="kv"><div className="k">Actual cost to date</div><div className="v num">{fmt$(p.actualCost)}</div></div>
+      <div className="kv"><div className="k">Actual margin</div><div className={'v num ' + gmColor(agm)}>{agm.toFixed(1)}%</div></div></>}</div></div>}
 
     <div className="cols">
       <div className="card" style={{ margin: 0 }}><h3>Activity</h3>
@@ -479,7 +491,7 @@ function Detail({ id, user, onBack }) {
       <div style={{ maxHeight: 220, overflow: 'auto' }}>{seqs.length ? seqs.map(q => { const chips = [['Fab', q.fabDate], ['Galv out', q.galvOut], ['Galv back', q.galvBack], ['Paint', q.paintDate], ['Ship', q.shipDate], ['Erect', q.erectDate]].filter(c => c[1]); const sc = SEQ_COLORS[q.status] || '#9aa0ab'; return <div key={q.id} style={{ padding: '10px 0', borderBottom: '1px solid #eef0f3' }}><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><b>{q.description || 'Sequence'}</b><span className="pill" style={{ background: sc + '1e', color: sc }}>{q.status}</span><div className="spacer" />{eS && <button className="btn-ghost btn-sm" onClick={() => setModal({ t: 'seq', data: q })}>Edit</button>}</div><div className="datestrip" style={{ margin: '8px 0 0' }}>{chips.length ? chips.map((c, i) => <span className="dchip" key={i}>{c[0]}: <b>{fmtDate(c[1])}</b></span>) : <span className="note">No dates set yet</span>}</div></div>; }) : <div className="empty">No sequences yet.</div>}</div>
     </div>
     <div className="card" style={{ margin: 0 }}><h3>Change orders {eC ? <button className="btn-pri btn-sm" onClick={() => setModal({ t: 'co' })}>+ Add C/O</button> : <span className="note">read-only</span>}</h3>
-      <div style={{ maxHeight: 220, overflow: 'auto' }}>{cos.length ? cos.map(c => <div className="li" key={c.id} style={{ cursor: 'pointer' }} onClick={() => setModal({ t: 'item', data: { kind: 'co', data: c } })}><div className="grow"><b>{c.coNumber}</b> · {c.description}<br /><span className="muted" style={{ fontSize: 12 }}>submitted {fmtDate(c.submittedDate)}</span></div><div className="num" style={{ minWidth: 90, textAlign: 'right', fontWeight: 700 }}>{fmt$(c.amount)}</div><div style={{ minWidth: 90, textAlign: 'right' }}>{coTag(c.status)}{coDoc[c.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none', marginLeft: 6 }} href={'/api/documents/' + coDoc[c.id].id + '/download'} onClick={e => e.stopPropagation()} title={coDoc[c.id].fileName}>📎</a>}</div></div>) : <div className="empty">No change orders yet.</div>}</div>
+      <div style={{ maxHeight: 220, overflow: 'auto' }}>{cos.length ? cos.map(c => <div className="li" key={c.id} style={{ cursor: 'pointer' }} onClick={() => setModal({ t: 'item', data: { kind: 'co', data: c } })}><div className="grow"><b>{c.coNumber}</b>{c.fromBid && fromBidChip} · {c.description}<br /><span className="muted" style={{ fontSize: 12 }}>submitted {fmtDate(c.submittedDate)}</span></div><div className="num" style={{ minWidth: 90, textAlign: 'right', fontWeight: 700 }}>{fmt$(c.amount)}</div><div style={{ minWidth: 90, textAlign: 'right' }}>{coTag(c.status)}{coDoc[c.id] && <a className="btn-ghost btn-sm" style={{ textDecoration: 'none', marginLeft: 6 }} href={'/api/documents/' + coDoc[c.id].id + '/download'} onClick={e => e.stopPropagation()} title={coDoc[c.id].fileName}>📎</a>}</div></div>) : <div className="empty">No change orders yet.</div>}</div>
     </div>
     </div>
 
@@ -754,6 +766,8 @@ function Billing({ onOpen }) {
 }
 
 const WHATS_NEW = [
+  { v: 'v1.10', date: 'September 16, 2026', title: 'Change orders and actual cost now flow with R&R Bid',
+    body: 'No existing job, change order or pay app is changed by this update. Change orders on a won job now come over from R&R Bid on their own: submitted there shows as Pending here, approved shows as Approved and raises the contract sum. If one is rejected, moved back to draft or deleted in R&R Bid, it is marked Withdrawn here instead of being removed, so anything attached to it stays, and it no longer counts. Marking a change order Paid still happens here, and R&R Bid never undoes it. Those change orders carry a small "from R&R Bid" tag. Change orders you type in here are never touched. The tracker also re-checks R&R Bid every night and after every update, so a job or change order that did not come through the first time shows up by the next morning. The check right after an update never sends email. The New job added email is now off for everyone, including anyone who had it on before today. Turn it on for yourself under Settings, My notifications, or an admin can turn it on for anyone. New on each job: an Actual cost to date box (Edit), which R&R Bid shows next to the estimate on that job\'s bid, and a link straight to the bid the job came from. From R&R Bid, the Project tab of a won bid now opens that job here directly.' },
   { v: 'v1.9', date: 'July 27, 2026', title: 'New left-hand ribbon, and notifications live under Settings',
     body: 'The tracker now uses the same dark side ribbon as the rest of the R&R Operating System and the bid tool, so moving between the tools feels the same. Everything that was in the top bar is in the ribbon on the left, with your name and Log out at the bottom. The Notifications button is gone from the top bar: open Settings and pick what you want emailed to you under My notifications. Everyone has Settings now, not just admins. Admins still see Users & roles and the team-wide notification grid underneath.' },
   { v: 'v1.8', date: 'July 27, 2026', title: 'Jobs with no retainage stay at zero',
@@ -911,6 +925,12 @@ function Guide({ user }) {
 
 function BidPullModal({ onClose, onDone }) {
   const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [result, setResult] = useState(null);
+  const [auto, setAuto] = useState(null);
+  useEffect(() => { api.get('/api/bid-sync').then(setAuto).catch(() => {}); }, []);
+  const lastLine = auto && auto.last && auto.last.at
+    ? 'Last automatic sync: ' + fmtWhen(auto.last.at) + (auto.last.ok ? '' : ' (failed: ' + (auto.last.error || 'unknown') + ')')
+    : auto && auto.configured ? 'Automatic sync runs a minute after each update and every night at 2 AM.' : null;
+  const coRes = result && result.changeOrders;
   const run = async () => {
     setBusy(true); setErr(null);
     try { const r = await api.send('POST', '/api/import/won-jobs'); setResult(r); }
@@ -923,10 +943,17 @@ function BidPullModal({ onClose, onDone }) {
           <div><span>Already in tracker (skipped)</span><span className="num">{result.skippedCount}</span></div>
         </div>
         {result.imported && result.imported.length > 0 && <div className="note" style={{ marginTop: 10 }}>Added: {result.imported.join(', ')}</div>}
+        {coRes && !coRes.error && !coRes.skipped && <div className="calc" style={{ marginTop: 10 }}>
+          <div><span>Change orders added</span><span className="num">{coRes.added || 0}</span></div>
+          <div><span>Change orders updated</span><span className="num">{coRes.updated || 0}</span></div>
+          <div><span>Change orders withdrawn</span><span className="num">{coRes.withdrawn || 0}</span></div>
+        </div>}
+        {coRes && coRes.error && <div className="err" style={{ marginTop: 10 }}>Jobs imported, but change orders could not be synced: {coRes.error}</div>}
         <div className="actions"><button className="btn-pri" onClick={onDone}>Done</button></div>
       </>
     : <>
-        <div className="note" style={{ lineHeight: 1.6 }}>This pulls every won bid that has a job number from the bid tool and adds any new ones to the tracker at the Awarded stage. Jobs already here are skipped, so running it again is safe.</div>
+        <div className="note" style={{ lineHeight: 1.6 }}>This pulls every won bid that has a job number from the bid tool and adds any new ones to the tracker at the Awarded stage, then brings change orders up to date. Jobs already here are skipped, so running it again is safe.</div>
+        {lastLine && <div className="note" style={{ marginTop: 8 }}>{lastLine}</div>}
         {err && <div className="err" style={{ marginTop: 10 }}>{err}</div>}
         <div className="actions"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-pri" disabled={busy} onClick={run}>{busy ? 'Importing…' : 'Import won jobs'}</button></div>
       </>}
@@ -994,9 +1021,20 @@ function ResetPassword({ token }) {
   </div></div>;
 }
 
-function Main({ user, onLogout }) {
+function Main({ user, onLogout, sso }) {
   const [view, setView] = useState({ name: 'projects' });
   const nav = name => setView({ name });
+  // Deep link from R&R Bid: /?job=<job number> opens that job.
+  useEffect(() => {
+    const job = new URLSearchParams(window.location.search).get('job');
+    if (!job) return;
+    window.history.replaceState(null, '', window.location.pathname);
+    api.get('/api/projects').then(list => {
+      const hit = Array.isArray(list) && list.find(x => x.jobNumber === job);
+      if (hit) setView({ name: 'detail', id: hit.id });
+      else alert('Job ' + job + ' is not in the tracker yet. It will show up after the next sync with R&R Bid.');
+    }).catch(() => {});
+  }, []);
   // Everyone gets Settings now; admins simply see more inside it.
   const items = [
     { k: 'projects', label: 'Projects', on: view.name === 'projects' || view.name === 'detail' },
@@ -1023,7 +1061,7 @@ function Main({ user, onLogout }) {
     </aside>
     <div className="main">
       {view.name === 'projects' && <Dashboard user={user} onOpen={id => setView({ name: 'detail', id })} />}
-      {view.name === 'detail' && <Detail id={view.id} user={user} onBack={() => nav('projects')} />}
+      {view.name === 'detail' && <Detail id={view.id} user={user} bidUrl={sso && sso.bidUrl} onBack={() => nav('projects')} />}
       {view.name === 'billing' && can.seeMoney(user.role) && <Billing onOpen={id => setView({ name: 'detail', id })} />}
       {view.name === 'guide' && <Guide user={user} />}
       {view.name === 'whatsnew' && <WhatsNew />}
@@ -1061,6 +1099,6 @@ export default function App() {
   return <>
     <style>{CSS}</style>
     {updateReady && <div className={'updbar' + (auth && auth.authenticated ? ' inmain' : '')}>A new version of the Tracker is available. <button onClick={() => window.location.reload()} style={{ marginLeft: 10, background: '#fff', color: '#ff6b35', border: 'none', borderRadius: 6, padding: '4px 12px', fontWeight: 700, cursor: 'pointer' }}>Update now</button></div>}
-    {resetToken ? <ResetPassword token={resetToken} /> : !auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" sso={sso} onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" sso={sso} onDone={reload} /> : <Main user={auth.user} onLogout={logout} />}
+    {resetToken ? <ResetPassword token={resetToken} /> : !auth ? <Splash /> : !auth.hasUsers ? <AuthScreen mode="setup" sso={sso} onDone={reload} /> : !auth.authenticated ? <AuthScreen mode="login" sso={sso} onDone={reload} /> : <Main user={auth.user} onLogout={logout} sso={sso} />}
   </>;
 }

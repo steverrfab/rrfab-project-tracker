@@ -166,22 +166,44 @@ async function runExtraMigrations() {
     // Per-user email notification preferences. One JSON blob per user keyed by
     // event name; a missing key means "off", so nobody is opted in by accident.
     await client.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_prefs jsonb NOT NULL DEFAULT '{}'::jsonb");
-    // Carry the old standalone new-job list over to the matching user accounts
-    // so today's behaviour survives the switch. Runs once: the guard skips
-    // anyone who already has the new_job key set.
-    try {
-      await client.query(`UPDATE users u SET notification_prefs = u.notification_prefs || '{"new_job": true}'::jsonb
-        FROM tracker_notification_recipients r
-        WHERE lower(r.email) = lower(u.email) AND r.active = true
-          AND NOT (u.notification_prefs ? 'new_job')`);
-      // Anyone on the old list without a tracker login cannot be carried over,
-      // since prefs now live on the user record. Name them in the deploy log so
-      // they are not silently dropped.
-      const orphans = await client.query(`SELECT r.email FROM tracker_notification_recipients r
-        WHERE r.active = true AND NOT EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(r.email))`);
-      if (orphans.rowCount) console.log('[migrate] These new-job recipients have no tracker account and will stop getting email until one is created: ' + orphans.rows.map(r => r.email).join(', '));
-    } catch (e) { console.error('[migrate] notification pref backfill skipped:', e.message); }
-    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines).');
+    // The new-job (won bid) email is OFF for everyone unless the person or an
+    // admin turns it on in Settings (Steve, 2026-09-16). The old step that
+    // copied the retired recipient list onto accounts as "on" is gone, and a
+    // one-time reset below turns it off for everyone who had it. Guarded by
+    // tracker_data_fixes so it runs once; anyone who turns it back on after
+    // that keeps it.
+    await client.query(`CREATE TABLE IF NOT EXISTS tracker_data_fixes (
+      name text PRIMARY KEY,
+      applied_at timestamptz NOT NULL DEFAULT now())`);
+    const fix = 'new_job_email_off_2026_09_16';
+    if (!(await client.query('SELECT 1 FROM tracker_data_fixes WHERE name = $1', [fix])).rowCount) {
+      await client.query('BEGIN');
+      try {
+        const r = await client.query(`UPDATE users SET notification_prefs = notification_prefs || '{"new_job": false}'::jsonb
+          WHERE (notification_prefs->>'new_job')::boolean IS TRUE RETURNING email`);
+        await client.query('INSERT INTO tracker_data_fixes (name) VALUES ($1)', [fix]);
+        await client.query('COMMIT');
+        console.log('[migrate] New-job email turned off for ' + r.rowCount + ' user(s)' + (r.rowCount ? ': ' + r.rows.map(x => x.email).join(', ') : '') + '. They can turn it back on in Settings.');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      }
+    }
+    // Bid tool link, round two. All additive: new nullable columns and an index.
+    //  - change_orders.source_co_id: the bid tool's change order id, so a change
+    //    order sent from R&R Bid updates one row instead of adding duplicates.
+    //    Change orders typed in here keep NULL and are never touched by the sync.
+    //  - 'Withdrawn' status: a change order that was pulled back or deleted in
+    //    R&R Bid is marked Withdrawn, never deleted, so any documents attached
+    //    to it here stay put. Withdrawn does not count toward the contract sum.
+    //    The old CHECK is dropped (same as invoices); the server validates.
+    //  - projects.actual_cost: real cost to date, typed in by the office, so the
+    //    bid tool can show estimated vs actual.
+    await client.query('ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS source_co_id integer');
+    await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uniq_change_orders_source ON change_orders (source_co_id) WHERE source_co_id IS NOT NULL');
+    await client.query('ALTER TABLE change_orders DROP CONSTRAINT IF EXISTS change_orders_status_check');
+    await client.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS actual_cost numeric(14,2)');
+    console.log('[migrate] Extra migrations applied (notes table, status lifecycle, archive columns, needs_setup flag, SOV + invoice lines, bid change-order link, actual cost).');
   } catch (err) {
     console.error('[migrate] extra migrations failed:', err.message);
   } finally {
