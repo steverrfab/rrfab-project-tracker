@@ -13,6 +13,7 @@
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^6.9.0",
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "archiver": "^7.0.1"
   }
 }

@@ -6,6 +6,7 @@ const mailer = require('./mailer');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const aia = require('./aiaExport');
+const backup = require('./backup');
 
 const app = express();
 app.use(express.json());
@@ -530,6 +531,29 @@ app.get('/sso', async (req, res) => {
     console.error('[sso] failed:', err);
     ssoErrorPage(res, invalidMsg);
   }
+});
+
+// ====== OFF-SITE BACKUP (SharePoint) ======
+// Runs by itself every night at 3 AM Eastern (startBackupTimer below). These let
+// someone check on it or run one now, with the shared TRACKER_KEY in the
+// X-Integration-Key header, e.g.
+//   curl -X POST -H "X-Integration-Key: $TRACKER_KEY" https://<tracker>/api/integration/backup
+// The POST waits for the backup to finish and returns what it did.
+function backupKeyOk(req, res) {
+  const key = process.env.TRACKER_KEY || '';
+  const provided = req.get('X-Integration-Key') || '';
+  if (!key || !provided || !safeEqual(provided, key)) { res.status(401).json({ error: 'invalid integration key' }); return false; }
+  return true;
+}
+app.get('/api/integration/backup', (req, res) => {
+  if (!backupKeyOk(req, res)) return;
+  res.json({ configured: backup.isConfigured(), missing: backup.missingConfig(), running: backup.state.running, last: backup.state.last });
+});
+app.post('/api/integration/backup', async (req, res) => {
+  if (!backupKeyOk(req, res)) return;
+  if (backup.state.running) return res.status(409).json({ error: 'a backup is already running' });
+  const r = await backup.runBackup('manual');
+  res.status(r.ok ? 200 : 500).json(r);
 });
 
 // Everything else under /api requires a logged-in user.
@@ -1695,6 +1719,25 @@ function startBidSyncTimer() {
   }, 10 * 60 * 1000).unref();
 }
 
+// Nightly off-site backup during the 3 AM Eastern hour. Checked every 5 minutes;
+// a restart at 3:20 still gets that night's backup, and one after 4 AM waits for
+// tomorrow instead of backing up on every deploy.
+let backupDoneFor = null;
+function startBackupTimer() {
+  if (!backup.isConfigured()) {
+    console.log('[backup] off-site backup is NOT configured. Missing: ' + backup.missingConfig().join(', '));
+    return;
+  }
+  console.log('[backup] off-site backup on: nightly at 3 AM Eastern to SharePoint folder ' + backup.CFG.folder + ', keeping ' + backup.CFG.keepDays + ' days');
+  setInterval(() => {
+    const now = easternParts(new Date());
+    if (now.hour === 3 && backupDoneFor !== now.day) {
+      backupDoneFor = now.day;
+      backup.runBackup('nightly');
+    }
+  }, 5 * 60 * 1000).unref();
+}
+
 // Admin view of the last catch-up run, and a button to run one now.
 app.get('/api/bid-sync', auth.requireRole('super_admin', 'admin'), (req, res) => {
   res.json({ configured: !!bidConfig(), running: bidSyncRunning, last: lastBidSync });
@@ -1748,6 +1791,7 @@ app.get('*', (req, res) => {
 // Demo seeding is intentionally turned off: real data only from here on.
 runMigrations().then(() => runExtraMigrations()).catch(err => console.error('[startup] failed:', err.message));
 startBidSyncTimer();
+startBackupTimer();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`R&R Project Tracker running on port ${PORT}`));
