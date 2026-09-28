@@ -45,7 +45,7 @@ const CFG = {
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || './data';
 // Left out of the zip: the login-signing secret (anyone holding it could forge a
 // login; without it a restore just signs everyone out once) and disk leftovers.
-const SKIP_IN_ZIP = ['jwt_secret', 'lost+found'];
+const SKIP_IN_ZIP = ['jwt_secret', 'lost+found', 'b2-backup-state.json', 'b2-backup-state.json.tmp'];
 
 function missingConfig() {
   const m = [];
@@ -245,4 +245,4 @@ async function runBackup(trigger) {
   return out;
 }
 
-module.exports = { runBackup, state, isConfigured, missingConfig, CFG };
+module.exports = { runBackup, state, isConfigured, missingConfig, CFG, zipDataDir };

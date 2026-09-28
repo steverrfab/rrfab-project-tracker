@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const aia = require('./aiaExport');
 const backup = require('./backup');
+const b2backup = require('./b2backup');
 
 const app = express();
 app.use(express.json());
@@ -545,15 +546,21 @@ function backupKeyOk(req, res) {
   if (!key || !provided || !safeEqual(provided, key)) { res.status(401).json({ error: 'invalid integration key' }); return false; }
   return true;
 }
+// Backblaze (b2backup.js) is the policy's offsite copy; SharePoint is the extra one.
+// The POST runs both, one after the other, e.g. before a risky change.
 app.get('/api/integration/backup', (req, res) => {
   if (!backupKeyOk(req, res)) return;
-  res.json({ configured: backup.isConfigured(), missing: backup.missingConfig(), running: backup.state.running, last: backup.state.last });
+  res.json({
+    configured: backup.isConfigured(), missing: backup.missingConfig(), running: backup.state.running, last: backup.state.last,
+    backblaze: { ...b2backup.state, missing: b2backup.missingConfig() },
+  });
 });
 app.post('/api/integration/backup', async (req, res) => {
   if (!backupKeyOk(req, res)) return;
-  if (backup.state.running) return res.status(409).json({ error: 'a backup is already running' });
+  if (backup.state.running || b2backup.state.running) return res.status(409).json({ error: 'a backup is already running' });
   const r = await backup.runBackup('manual');
-  res.status(r.ok ? 200 : 500).json(r);
+  const b2 = await b2backup.runOnce({ force: true, trigger: 'manual' });
+  res.status(r.ok && b2.ok ? 200 : 500).json({ ...r, backblaze: b2 });
 });
 
 // Everything else under /api requires a logged-in user.
@@ -1792,6 +1799,7 @@ app.get('*', (req, res) => {
 runMigrations().then(() => runExtraMigrations()).catch(err => console.error('[startup] failed:', err.message));
 startBidSyncTimer();
 startBackupTimer();
+b2backup.start();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`R&R Project Tracker running on port ${PORT}`));

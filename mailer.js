@@ -13,8 +13,10 @@ const TOKEN_TIMEOUT_MS = 10000, SEND_TIMEOUT_MS = 15000;
 function withTimeout(p, ms, label) {
   return Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error(label + ' timed out')), ms))]);
 }
-function graphConfigured() {
-  return !!(process.env.AZURE_TENANT_ID && process.env.AZURE_CLIENT_ID && process.env.AZURE_CLIENT_SECRET && process.env.AZURE_SENDER_USER);
+// `sender` lets one message go out from a named mailbox (backup alerts use
+// B2_BACKUP_ALERT_FROM) without turning on every other tracker email.
+function graphConfigured(sender) {
+  return !!(process.env.AZURE_TENANT_ID && process.env.AZURE_CLIENT_ID && process.env.AZURE_CLIENT_SECRET && (sender || process.env.AZURE_SENDER_USER));
 }
 function smtpConfigured() {
   return !!(nodemailer && process.env.SMTP_USER && process.env.SMTP_PASS);
@@ -38,8 +40,8 @@ async function getGraphToken() {
   cachedToken = data.access_token; cachedExp = now + data.expires_in * 1000;
   return cachedToken;
 }
-async function sendViaGraph({ to, subject, html, text }) {
-  const sender = process.env.AZURE_SENDER_USER;
+async function sendViaGraph({ to, subject, html, text, sender: fromMailbox }) {
+  const sender = fromMailbox || process.env.AZURE_SENDER_USER;
   const message = {
     subject, body: { contentType: 'HTML', content: html || text || '' },
     from: { emailAddress: { address: sender, name: process.env.AZURE_SENDER_DISPLAY || FROM_NAME } },
@@ -65,7 +67,7 @@ async function sendViaSmtp({ to, subject, html, text }) {
   return { ok: true };
 }
 async function sendMail(opts) {
-  if (graphConfigured()) return sendViaGraph(opts);
+  if (graphConfigured(opts.sender)) return sendViaGraph(opts);
   if (smtpConfigured()) return sendViaSmtp(opts);
   throw new Error('Email is not configured');
 }

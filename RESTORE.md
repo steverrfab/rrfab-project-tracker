@@ -1,5 +1,10 @@
 # Restoring the Project Tracker from a backup
 
+There are two nightly backups. **Backblaze is the main one** (a standard
+`pg_dump` file that loads into any PostgreSQL 18 database with `pg_restore`);
+`RECOVERY.md` has those steps and the full rebuild. This page covers the
+SharePoint copy, which is the extra one.
+
 Every night at 3 AM Eastern the tracker saves two files to SharePoint, in the
 `RR_Tracker_Backups` folder:
 
@@ -77,5 +82,6 @@ Before a risky change, you can take one on the spot:
 curl -X POST -H "X-Integration-Key: <TRACKER_KEY>" https://<tracker address>/api/integration/backup
 ```
 
-It answers when done, with what it saved. The same address with GET (no `-X
+It runs the SharePoint backup and then the Backblaze one, and answers when both
+are done, with what each saved. The same address with GET (no `-X
 POST`) shows the last run and whether anything is missing from the setup.
